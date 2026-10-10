@@ -207,60 +207,88 @@ func main() {
 		return
 	}
 
-	par := until(start(push, "e2e-parallel", nil, workflows.StartOptions{}).ID, terminal, time.Minute)
-	check(par.Status == "completed" && output[int](par.ID) == 6 && stepNamed(par, "p0").Status == "completed" &&
-		stepNamed(par, "p1").Status == "completed" && stepNamed(par, "p2").Status == "completed", "parallel steps run as step invocations and join", par)
-	fmt.Println("ok   parallel")
-
-	cb := start(push, "e2e-callback", nil, workflows.StartOptions{})
-	url := waitState(func(s state) bool { return s.CallbackURL != "" }, time.Minute).CallbackURL
-	// The URL is on the public API base (an https origin); the local stack serves the same path.
-	i := strings.Index(url, "/public/v1/callbacks/")
-	check(i > 0 && strings.HasPrefix(url, "https://"), "the callback's URL is on the public API base", url)
-	url = envOr("E2E_API", "http://127.0.0.1:6100") + url[i:]
-	until(cb.ID, func(r *workflows.WorkflowRun) bool { return stepNamed(r, "approval").Status == "waiting" }, time.Minute)
-	err = workflows.CompleteCallbackURL(ctx, http.DefaultClient, url, "approved")
-	if err != nil {
-		fail(err)
+	if only("parallel") {
+		par := until(start(push, "e2e-parallel", nil, workflows.StartOptions{}).ID, terminal, time.Minute)
+		check(par.Status == "completed" && output[int](par.ID) == 6 && stepNamed(par, "p0").Status == "completed" &&
+			stepNamed(par, "p1").Status == "completed" && stepNamed(par, "p2").Status == "completed", "parallel steps run as step invocations and join", par)
+		fmt.Println("ok   parallel")
 	}
-	again := workflows.CompleteCallbackURL(ctx, http.DefaultClient, url, "approved")
-	differ := workflows.CompleteCallbackURL(ctx, http.DefaultClient, url, "rejected")
-	cbr := until(cb.ID, terminal, time.Minute)
-	check(cbr.Status == "completed" && output[string](cb.ID) == "approved" && again == nil && errors.As(differ, &ae) && ae.Status == 409,
-		"a callback completes once over HTTP; a repeat is idempotent, a different body 409", []any{cbr, fmt.Sprint(again), fmt.Sprint(differ)})
-	fmt.Println("ok   callback")
 
-	parent := until(start(push, "e2e-parent", nil, workflows.StartOptions{}).ID, terminal, 90*time.Second)
-	check(parent.Status == "completed" && output[int](parent.ID) == 41, "a child workflow's result reaches its parent", parent)
-	fmt.Println("ok   child workflow")
+	if only("callback") {
+		cb := start(push, "e2e-callback", nil, workflows.StartOptions{})
+		url := waitState(func(s state) bool { return s.CallbackURL != "" }, time.Minute).CallbackURL
+		// The URL is on the public API base (an https origin); the local stack serves the same path.
+		i := strings.Index(url, "/public/v1/callbacks/")
+		check(i > 0 && strings.HasPrefix(url, "https://"), "the callback's URL is on the public API base", url)
+		url = envOr("E2E_API", "http://127.0.0.1:6100") + url[i:]
+		until(cb.ID, func(r *workflows.WorkflowRun) bool { return stepNamed(r, "approval").Status == "waiting" }, time.Minute)
+		if err := workflows.CompleteCallbackURL(ctx, http.DefaultClient, url, "approved"); err != nil {
+			fail(err)
+		}
+		again := workflows.CompleteCallbackURL(ctx, http.DefaultClient, url, "approved")
+		differ := workflows.CompleteCallbackURL(ctx, http.DefaultClient, url, "rejected")
+		cbr := until(cb.ID, terminal, time.Minute)
+		check(cbr.Status == "completed" && output[string](cb.ID) == "approved" && again == nil && errors.As(differ, &ae) && ae.Status == 409,
+			"a callback completes once over HTTP; a repeat is idempotent, a different body 409", []any{cbr, fmt.Sprint(again), fmt.Sprint(differ)})
+		fmt.Println("ok   callback")
+	}
 
-	sched := must(client.CreateSchedule(ctx, workflows.ScheduleSpec{AppID: push, Workflow: "e2e-scheduled", Name: "e2e", Cron: "* * * * *", TimeZone: "UTC"}))
-	trig := until(must(client.TriggerSchedule(ctx, sched.ID, fmt.Sprintf("t-%d", time.Now().UnixNano()))).ID, terminal, time.Minute)
-	check(trig.Status == "completed", "a triggered schedule run completes", trig)
-	fired := waitState(func(s state) bool {
-		for _, e := range s.Scheduled {
+	if only("child") {
+		parent := until(start(push, "e2e-parent", nil, workflows.StartOptions{}).ID, terminal, 90*time.Second)
+		check(parent.Status == "completed" && output[int](parent.ID) == 41, "a child workflow's result reaches its parent", parent)
+		fmt.Println("ok   child workflow")
+	}
+
+	if only("schedule") {
+		sched := must(client.CreateSchedule(ctx, workflows.ScheduleSpec{AppID: push, Workflow: "e2e-scheduled", Name: "e2e", Cron: "* * * * *", TimeZone: "UTC"}))
+		trig := until(must(client.TriggerSchedule(ctx, sched.ID, fmt.Sprintf("t-%d", time.Now().UnixNano()))).ID, terminal, time.Minute)
+		check(trig.Status == "completed", "a triggered schedule run completes", trig)
+		fired := waitState(func(s state) bool {
+			for _, e := range s.Scheduled {
+				if e.RunID != trig.ID && e.ScheduleID == sched.ID {
+					return true
+				}
+			}
+			return false
+		}, 150*time.Second)
+		must(client.PauseSchedule(ctx, sched.ID))
+		var firing *scheduled
+		for i, e := range fired.Scheduled {
 			if e.RunID != trig.ID && e.ScheduleID == sched.ID {
-				return true
+				firing = &fired.Scheduled[i]
 			}
 		}
-		return false
-	}, 150*time.Second)
-	must(client.PauseSchedule(ctx, sched.ID))
-	var firing *scheduled
-	for i, e := range fired.Scheduled {
-		if e.RunID != trig.ID && e.ScheduleID == sched.ID {
-			firing = &fired.Scheduled[i]
-		}
+		check(firing != nil && firing.ScheduledTime.Second() == 0 && firing.ScheduledTime.Nanosecond() == 0,
+			"the schedule fired on its own, and the run saw its schedule and the minute it was scheduled for", fired)
+		fmt.Println("ok   schedule")
 	}
-	check(firing != nil && firing.ScheduledTime.Second() == 0 && firing.ScheduledTime.Nanosecond() == 0,
-		"the schedule fired on its own, and the run saw its schedule and the minute it was scheduled for", fired)
-	fmt.Println("ok   schedule")
 
-	pr := until(start(pull, "e2e-pull", map[string]int{"x": 4}, workflows.StartOptions{}).ID, terminal, 90*time.Second)
-	check(pr.Status == "completed" && output[int](pr.ID) == 10, "a pull worker runs the workflow", pr)
-	fmt.Println("ok   pull worker")
+	if only("pull") {
+		pr := until(start(pull, "e2e-pull", map[string]int{"x": 4}, workflows.StartOptions{}).ID, terminal, 90*time.Second)
+		check(pr.Status == "completed" && output[int](pr.ID) == 10, "a pull worker runs the workflow", pr)
+		fmt.Println("ok   pull worker")
+	}
+	if os.Getenv("E2E_ONLY") != "" {
+		fmt.Println("PASSED (only " + os.Getenv("E2E_ONLY") + ")")
+		return
+	}
 
 	fmt.Println("PASSED")
+}
+
+// only reports whether a phase 2 check runs: all of them, unless E2E_ONLY lists some (local
+// debugging).
+func only(name string) bool {
+	list := os.Getenv("E2E_ONLY")
+	if list == "" {
+		return true
+	}
+	for _, n := range strings.Split(list, ",") {
+		if n == name {
+			return true
+		}
+	}
+	return false
 }
 
 func envOr(k, d string) string {

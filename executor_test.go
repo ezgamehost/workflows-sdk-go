@@ -808,3 +808,37 @@ func TestWorkflowInfoCarriesTheFullPolicy(t *testing.T) {
 		t.Fatal(show(plain.definition().info()))
 	}
 }
+
+func TestGroupsWithoutStepsAreDeterministic(t *testing.T) {
+	wf := New("tie", func(ctx Context, _ none) (int, error) {
+		if err := Parallel(ctx); err != nil {
+			return 0, err
+		}
+		w, err := Race(ctx,
+			func(Context) error { time.Sleep(time.Millisecond); return nil },
+			func(Context) error { return nil },
+		)
+		if err != nil {
+			return 0, err
+		}
+		// Nested: a race inside a parallel branch.
+		var inner int
+		err = Parallel(ctx,
+			func(c Context) (err error) {
+				inner, err = Race(c,
+					func(cc Context) error { _, err := step(cc, "slow", 1); return err },
+					func(Context) error { return nil },
+				)
+				return
+			},
+			func(c Context) error { _, err := step(c, "other", 2); return err },
+		)
+		return w*10 + inner, err
+	})
+	for i := 0; i < 30; i++ {
+		cmds := run(t, wf, invocation("tie", nil, entry(1, "other", "run", "completed", 1, "2")), &fakeIO{})
+		if show(cmds) != `[{"type":"runCompleted","output":1}]` {
+			t.Fatalf("iteration %d: %s", i, show(cmds))
+		}
+	}
+}
