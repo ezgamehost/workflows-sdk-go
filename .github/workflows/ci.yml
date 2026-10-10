@@ -1,0 +1,34 @@
+name: CI
+
+# check: gofmt, vet, staticcheck, unit tests with workflows-stack's vendored protocol vectors
+# (testdata/vectors), and no runtime dependencies. G5 adds conformance and e2e, which read the
+# internal workflows-stack repository with the WORKFLOWS_STACK_DEPLOY_KEY secret.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - run: go vet ./...
+      - run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
+      - run: go test -race ./...
+      - name: no runtime dependencies
+        run: test "$(go list -m all | wc -l)" -eq 1

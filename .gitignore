@@ -1,0 +1,4 @@
+/.bin/
+/.workflows-stack/
+*.test
+*.out
