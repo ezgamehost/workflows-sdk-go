@@ -1,8 +1,8 @@
 name: CI
 
 # check: gofmt, vet, staticcheck, unit tests with workflows-stack's vendored protocol vectors
-# (testdata/vectors), and no runtime dependencies. G5 adds conformance and e2e, which read the
-# internal workflows-stack repository with the WORKFLOWS_STACK_DEPLOY_KEY secret.
+# (testdata/vectors), and no runtime dependencies.
+# conformance: workflows-stack's conformance harness against conformance/ (push and pull).
 on:
   push:
     branches: [main]
@@ -32,3 +32,48 @@ jobs:
       - run: go test -race ./...
       - name: no runtime dependencies
         run: test "$(go list -m all | wc -l)" -eq 1
+
+  # workflows-stack's conformance harness (cmd/workflows-conformance, protocol/conformance) against
+  # conformance/ (the push handler, and the same workflows as a pull worker), at the
+  # workflows-stack commit in .workflows-stack-rev. workflows-stack is internal: the job reads it
+  # with the WORKFLOWS_STACK_DEPLOY_KEY secret (a read-only deploy key on workflows-stack), and
+  # fails on a push to main when the secret is missing (so a deleted key can't turn main silently
+  # green). Pull requests without it (forks get no secrets) skip with a notice.
+  conformance:
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - id: token
+        env:
+          TOKEN: ${{ secrets.WORKFLOWS_STACK_DEPLOY_KEY }}
+        run: |
+          if [ -n "$TOKEN" ]; then echo "present=true" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            echo "::error title=conformance can't run::WORKFLOWS_STACK_DEPLOY_KEY isn't set, so this job can't read ezgamehost/workflows-stack. On main that's a failure, not a skip: restore the deploy key."; exit 1
+          else echo "::notice title=conformance skipped::WORKFLOWS_STACK_DEPLOY_KEY isn't available to this pull request; the conformance harness didn't run."; fi
+      - if: steps.token.outputs.present == 'true'
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - if: steps.token.outputs.present == 'true'
+        id: rev
+        run: echo "sha=$(cat .workflows-stack-rev)" >> "$GITHUB_OUTPUT"
+      - if: steps.token.outputs.present == 'true'
+        uses: actions/checkout@v7
+        with:
+          repository: ezgamehost/workflows-stack
+          ref: ${{ steps.rev.outputs.sha }}
+          ssh-key: ${{ secrets.WORKFLOWS_STACK_DEPLOY_KEY }}
+          path: .workflows-stack
+          persist-credentials: false
+      - if: steps.token.outputs.present == 'true'
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: .workflows-stack/go.sum
+      - if: steps.token.outputs.present == 'true'
+        name: vendored vectors match workflows-stack
+        run: diff -r --exclude SOURCE --exclude README.md .workflows-stack/protocol/vectors testdata/vectors
+      - if: steps.token.outputs.present == 'true'
+        run: scripts/conformance.sh .workflows-stack
