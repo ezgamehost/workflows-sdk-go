@@ -6,7 +6,8 @@
 # Needs DATABASE_URL (use a database of its own: it migrates and fills it). REDIS_URL and B2_* are
 # optional locally (see below); CI sets them. E2E_PHASE1_ONLY=1 runs the phase 1 checks only.
 # E2E_PORT_OFFSET shifts every port (the app 3200, fake org-api 4100, api 6100, live 6150, engine
-# 6200, dispatch 6250, metrics 9090), so two suites can share a machine.
+# 6200, dispatch 6250, metrics 9090), so two suites can share a machine; the engine's advertised
+# URL, dispatch and live URLs follow them. E2E_WARMUP_SECONDS waits after the stack is ready.
 set -euo pipefail
 stack=$(cd "${1:?usage: scripts/e2e.sh <workflows-stack checkout>}" && pwd)
 root=$(pwd)
@@ -65,6 +66,8 @@ wait_for http://127.0.0.1:$org_port/health
 .bin/workflows-stack migrate
 .bin/workflows-stack all > .bin/stack.log 2>&1 & stack_pid=$!; pids+=($stack_pid)
 wait_for http://127.0.0.1:$PORT/ready "$stack_pid" || { tail -n 200 .bin/stack.log; exit 1; }
+# A cold engine leases its 1,024 shards over time; against a remote database that takes minutes.
+sleep "${E2E_WARMUP_SECONDS:-0}"
 
 read -r E2E_APP_ID EZGH_WORKFLOWS_SIGNING_SECRET E2E_PULL_APP_ID < <(.bin/e2e-setup) || { tail -n 100 .bin/stack.log; exit 1; }
 export E2E_APP_ID EZGH_WORKFLOWS_SIGNING_SECRET E2E_PULL_APP_ID
