@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -104,4 +105,19 @@ func chain(n int) *WireError {
 		e = &WireError{Code: "user", Name: "E", Message: "m", Cause: e}
 	}
 	return e
+}
+
+func TestStepFailedAlwaysCarriesRetryable(t *testing.T) {
+	b, err := marshal(Command{Type: CommandStepFailed, StepID: "s", Name: "n", Attempt: 1, Error: &WireError{Code: "user", Name: "E", Message: "<m>"}})
+	if err != nil || string(b) != `{"type":"stepFailed","stepId":"s","name":"n","attempt":1,"error":{"code":"user","name":"E","message":"<m>"},"retryable":false}` {
+		t.Fatalf("%s %v", b, err)
+	}
+	b, _ = marshal(Command{Type: CommandStepCompleted, StepID: "s", Name: "n", Output: json.RawMessage(`"<&>"`)})
+	if string(b) != `{"type":"stepCompleted","stepId":"s","name":"n","output":"<&>"}` {
+		t.Fatalf("%s", b)
+	}
+	var back Command
+	if err := json.Unmarshal([]byte(`{"type":"stepFailed","retryable":true}`), &back); err != nil || !back.Retryable {
+		t.Fatal(err)
+	}
 }
