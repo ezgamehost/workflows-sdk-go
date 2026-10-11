@@ -234,13 +234,48 @@ func (r PollRequest) Validate() error {
 	case len(r.ProtocolVersions) == 0:
 		return invalid("protocolVersions is empty")
 	}
-	for i, w := range r.Workflows {
-		if !workflowNameRe.MatchString(w.Name) {
-			return invalid("workflows[%d].name %q", i, w.Name)
+	if err := ValidateSDK(r.SDK); err != nil {
+		return err
+	}
+	return ValidateWorkflows(r.Workflows)
+}
+
+// Limits on what an app reports about itself, in a sync reply or a pull worker's announcement.
+const (
+	MaxWorkflows       = 1000
+	MaxSDKNameBytes    = 200
+	MaxSDKVersionBytes = 100
+)
+
+// ValidateSDK checks an SDK's name and version: present, at most 200 and 100 bytes.
+func ValidateSDK(s SDKInfo) error {
+	switch {
+	case strings.TrimSpace(s.Name) == "" || strings.TrimSpace(s.Version) == "":
+		return invalid("sdk name and version are required")
+	case len(s.Name) > MaxSDKNameBytes || len(s.Version) > MaxSDKVersionBytes:
+		return invalid("sdk name (at most %d bytes) or version (at most %d) is too long", MaxSDKNameBytes, MaxSDKVersionBytes)
+	}
+	return nil
+}
+
+// ValidateWorkflows checks the workflows an app serves (sync replies and pull announcements): at
+// most 1,000, each name valid and listed once, timeoutMs not negative, retry policies valid.
+func ValidateWorkflows(ws []WorkflowInfo) error {
+	if len(ws) > MaxWorkflows {
+		return invalid("at most %d workflows", MaxWorkflows)
+	}
+	seen := make(map[string]bool, len(ws))
+	for i, w := range ws {
+		if !workflowNameRe.MatchString(w.Name) || seen[w.Name] {
+			return invalid("workflows[%d].name %q is invalid or repeated", i, w.Name)
+		}
+		seen[w.Name] = true
+		if w.TimeoutMs < 0 {
+			return invalid("workflow %q has a negative timeoutMs", w.Name)
 		}
 		if w.Retry != nil {
 			if err := w.Retry.Validate(); err != nil {
-				return err
+				return fmt.Errorf("workflow %q: %w", w.Name, err)
 			}
 		}
 	}

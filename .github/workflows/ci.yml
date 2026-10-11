@@ -111,9 +111,6 @@ jobs:
       B2_BUCKET: workflows-e2e
       B2_KEY_ID: workflowstestkey
       B2_APPLICATION_KEY: workflowstestsecret
-      # The pinned workflows-stack predates callbacks, children, schedules and pull apps: phase 1
-      # checks only, until the pin moves to a commit with them.
-      E2E_PHASE1_ONLY: "1"
     steps:
       - id: token
         env:

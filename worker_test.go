@@ -447,3 +447,34 @@ func TestNewWorkerChecksThePoll(t *testing.T) {
 		}
 	}
 }
+
+// A poll the gateway can't start answers 503 with Retry-After: 1; 429 and other 5xx back off
+// too. None of them may hot-loop.
+func TestWorkerNeverHotLoopsOnRetryableAnswers(t *testing.T) {
+	for _, c := range []struct {
+		status     int
+		retryAfter string
+	}{{503, "1"}, {503, ""}, {429, "1"}, {500, ""}, {502, ""}} {
+		f := newFakeLive(t)
+		f.pollStatus, f.pollRetryAfter = c.status, c.retryAfter
+		cancel, done := startWorker(t, f, WorkerOptions{})
+		time.Sleep(2500 * time.Millisecond)
+		cancel()
+		if err := <-done; err != nil {
+			t.Fatalf("%d: Run returned %v; a retryable answer must not stop the worker", c.status, err)
+		}
+		done <- nil
+		f.mu.Lock()
+		n := len(f.polls)
+		f.mu.Unlock()
+		// 2.5 s: Retry-After 1 allows at most 3 polls; backoff without it (250–500 ms, doubling)
+		// at most 5.
+		limit := 5
+		if c.retryAfter == "1" {
+			limit = 3
+		}
+		if n < 2 || n > limit {
+			t.Fatalf("%d (Retry-After %q): %d polls in 2.5 s", c.status, c.retryAfter, n)
+		}
+	}
+}

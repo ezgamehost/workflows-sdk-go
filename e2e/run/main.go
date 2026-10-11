@@ -217,10 +217,10 @@ func main() {
 	if only("callback") {
 		cb := start(push, "e2e-callback", nil, workflows.StartOptions{})
 		url := waitState(func(s state) bool { return s.CallbackURL != "" }, time.Minute).CallbackURL
-		// The URL is on the public API base (an https origin); the local stack serves the same path.
-		i := strings.Index(url, "/public/v1/callbacks/")
-		check(i > 0 && strings.HasPrefix(url, "https://"), "the callback's URL is on the public API base", url)
-		url = envOr("E2E_API", "http://127.0.0.1:6100") + url[i:]
+		// The URL is endpoints.api (locally, the API itself) + /public/v1/callbacks/ + the token.
+		api := envOr("E2E_API", "http://127.0.0.1:6100")
+		check(strings.HasPrefix(url, api+"/public/v1/callbacks/") && len(url) == len(api)+len("/public/v1/callbacks/")+47,
+			"the callback's URL is the API's /public/v1/callbacks/<token>", url)
 		until(cb.ID, func(r *workflows.WorkflowRun) bool { return stepNamed(r, "approval").Status == "waiting" }, time.Minute)
 		if err := workflows.CompleteCallbackURL(ctx, http.DefaultClient, url, "approved"); err != nil {
 			fail(err)

@@ -271,11 +271,6 @@ func TestValidateMessageVectors(t *testing.T) {
 	for _, raw := range m.PollRequest.Invalid {
 		var r PollRequest
 		_ = json.Unmarshal(raw, &r)
-		var probe map[string]json.RawMessage
-		_ = json.Unmarshal(raw, &probe)
-		if _, hasSDK := probe["sdk"]; !hasSDK {
-			continue // a missing sdk is a schema check; the SDK always sends one
-		}
 		if err := r.Validate(); !errors.Is(err, ErrInvalid) {
 			t.Errorf("invalid %s validated: %v", raw, err)
 		}
