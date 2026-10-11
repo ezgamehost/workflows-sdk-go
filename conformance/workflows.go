@@ -273,5 +273,32 @@ func all() []workflows.Workflow {
 				return "done", nil
 			})
 		}),
+		workflows.New("branches", func(ctx workflows.Context, _ none) (map[string]string, error) {
+			var a, b string
+			err := workflows.Parallel(ctx,
+				func(c workflows.Context) error {
+					cb, err := workflows.CreateCallback(c, "approval", time.Minute)
+					if err != nil {
+						return err
+					}
+					if a, err = step(c, "log", "A"); err != nil {
+						return err
+					}
+					_, err = workflows.WaitCallback[any](c, cb)
+					return err
+				},
+				func(c workflows.Context) (err error) {
+					if _, err = step(c, "prep", "P"); err != nil {
+						return err
+					}
+					b, err = step(c, "log", "B")
+					return
+				},
+			)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]string{"a": a, "b": b}, nil
+		}),
 	}
 }
