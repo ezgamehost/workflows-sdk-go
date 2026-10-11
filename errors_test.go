@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ezgamehost/workflows-sdk-go/protocol"
+	"github.com/ezgamehost/workflows-sdk-go/internal/protocol"
 )
 
 func loadVector(t *testing.T, name string, v any) {

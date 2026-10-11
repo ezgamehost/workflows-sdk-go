@@ -3,7 +3,7 @@ package workflows
 import (
 	"testing"
 
-	"github.com/ezgamehost/workflows-sdk-go/protocol"
+	"github.com/ezgamehost/workflows-sdk-go/internal/protocol"
 )
 
 func TestReplayOrderVector(t *testing.T) {

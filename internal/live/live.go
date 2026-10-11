@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/ezgamehost/workflows-sdk-go/internal/jsonx"
-	"github.com/ezgamehost/workflows-sdk-go/protocol"
+	"github.com/ezgamehost/workflows-sdk-go/internal/protocol"
 )
 
 // ErrSuperseded: workflows-live answered 409, so the engine has moved on. Stop at once.

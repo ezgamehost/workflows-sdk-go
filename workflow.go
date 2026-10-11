@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/ezgamehost/workflows-sdk-go/protocol"
+	"github.com/ezgamehost/workflows-sdk-go/internal/protocol"
 )
 
 // Workflow is a workflow definition, as New returns it.
@@ -15,17 +15,57 @@ type Workflow interface {
 	definition() *definition
 }
 
-// RetryPolicy is a step retry policy: MaxAttempts attempts, waiting
-// min(MaxMs, InitialMs × Multiplier^(attempt−1)) before each retry.
-type RetryPolicy = protocol.RetryPolicy
+// RetryPolicy is a step retry policy: at most MaxAttempts attempts, waiting
+// min(Max, Initial × Multiplier^(attempt−1)) before each retry. Every field counts, zero
+// included: start from DefaultRetry and change what you need.
+//
+//	p := workflows.DefaultRetry
+//	p.MaxAttempts = 3
+type RetryPolicy struct {
+	MaxAttempts int           // 1–100
+	Initial     time.Duration // the first retry's delay, at least 0 (whole milliseconds)
+	Max         time.Duration // the longest delay, 0 to 24 hours (whole milliseconds)
+	Multiplier  float64       // 1–10
+}
 
-// DefaultRetry is the retry policy of a step that sets none: 5 attempts, 1 s, ×2, at most 10
-// minutes.
-var DefaultRetry = protocol.DefaultRetry
+// DefaultRetry is the retry policy of a step that sets none: 5 attempts, 1 s apart doubling to
+// at most 10 minutes.
+var DefaultRetry = RetryPolicy{MaxAttempts: 5, Initial: time.Second, Max: 10 * time.Minute, Multiplier: 2}
+
+// wire checks the policy against the engine's bounds and converts it.
+func (p RetryPolicy) wire() (protocol.RetryPolicy, error) {
+	if p.Initial%time.Millisecond != 0 || p.Max%time.Millisecond != 0 {
+		return protocol.RetryPolicy{}, fmt.Errorf("a retry policy's Initial and Max are whole milliseconds, got %v and %v", p.Initial, p.Max)
+	}
+	w := protocol.RetryPolicy{MaxAttempts: p.MaxAttempts, InitialMs: p.Initial.Milliseconds(), MaxMs: p.Max.Milliseconds(), Multiplier: p.Multiplier}
+	if err := w.Validate(); err != nil {
+		return protocol.RetryPolicy{}, fmt.Errorf("the retry policy %+v is out of bounds (MaxAttempts 1–100, Initial ≥ 0, Max 0–24 h, Multiplier 1–10): %w", p, err)
+	}
+	return w, nil
+}
+
+func retryFromWire(w protocol.RetryPolicy) RetryPolicy {
+	return RetryPolicy{MaxAttempts: w.MaxAttempts, Initial: time.Duration(w.InitialMs) * time.Millisecond, Max: time.Duration(w.MaxMs) * time.Millisecond, Multiplier: w.Multiplier}
+}
+
+// MarshalJSON writes the policy as the API does: {maxAttempts, initialMs, maxMs, multiplier}.
+func (p RetryPolicy) MarshalJSON() ([]byte, error) {
+	return json.Marshal(protocol.RetryPolicy{MaxAttempts: p.MaxAttempts, InitialMs: p.Initial.Milliseconds(), MaxMs: p.Max.Milliseconds(), Multiplier: p.Multiplier})
+}
+
+// UnmarshalJSON reads the API's form.
+func (p *RetryPolicy) UnmarshalJSON(b []byte) error {
+	var w protocol.RetryPolicy
+	if err := json.Unmarshal(b, &w); err != nil {
+		return err
+	}
+	*p = retryFromWire(w)
+	return nil
+}
 
 type definition struct {
 	name    string
-	retry   *RetryPolicy // the workflow's default for its steps (merged with DefaultRetry); nil: DefaultRetry
+	retry   *protocol.RetryPolicy // the workflow's default for its steps; nil: DefaultRetry
 	timeout time.Duration
 	run     func(ctx Context, input json.RawMessage) (json.RawMessage, error)
 }
@@ -48,16 +88,15 @@ func (d *definition) info() protocol.WorkflowInfo {
 // WorkflowOption configures a workflow in New.
 type WorkflowOption func(*definition) error
 
-// WithRetry sets the default retry policy of the workflow's steps. Zero fields take
-// DefaultRetry's values, and the result must be within the engine's bounds (MaxAttempts 1–100,
-// MaxMs at most 24 hours, Multiplier 1–10).
+// WithRetry sets the default retry policy of the workflow's steps. The policy is used as given
+// (start from DefaultRetry), and must be within the engine's bounds.
 func WithRetry(p RetryPolicy) WorkflowOption {
 	return func(d *definition) error {
-		m := mergeRetry(DefaultRetry, p)
-		if err := m.Validate(); err != nil {
+		w, err := p.wire()
+		if err != nil {
 			return err
 		}
-		d.retry = &m
+		d.retry = &w
 		return nil
 	}
 }
@@ -74,22 +113,6 @@ func WithTimeout(t time.Duration) WorkflowOption {
 		d.timeout = t
 		return nil
 	}
-}
-
-func mergeRetry(base, p RetryPolicy) RetryPolicy {
-	if p.MaxAttempts != 0 {
-		base.MaxAttempts = p.MaxAttempts
-	}
-	if p.InitialMs != 0 {
-		base.InitialMs = p.InitialMs
-	}
-	if p.MaxMs != 0 {
-		base.MaxMs = p.MaxMs
-	}
-	if p.Multiplier != 0 {
-		base.Multiplier = p.Multiplier
-	}
-	return base
 }
 
 // New defines a workflow named name (^[A-Za-z0-9_-]{1,64}$) running fn. Its input is decoded from
@@ -123,8 +146,11 @@ func New[I, O any](name string, fn func(ctx Context, in I) (O, error), opts ...W
 }
 
 // ScheduleInfo is set on a run a schedule started: the schedule's ID and the scheduled (cron)
-// time.
-type ScheduleInfo = protocol.ScheduleInfo
+// time, which isn't the jittered time it fired.
+type ScheduleInfo struct {
+	ID            string    `json:"id"`
+	ScheduledTime time.Time `json:"scheduledTime"`
+}
 
 // RunInfo describes the run a workflow is executing.
 type RunInfo struct {

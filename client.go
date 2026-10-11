@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/ezgamehost/workflows-sdk-go/internal/jsonx"
-	"github.com/ezgamehost/workflows-sdk-go/protocol"
 )
 
 // DefaultBaseURL is the Workflows API.
@@ -206,6 +205,10 @@ func (c *Client) do(ctx context.Context, r request) error {
 		if (res.StatusCode != http.StatusTooManyRequests && res.StatusCode != http.StatusServiceUnavailable) || attempt >= c.retries {
 			return ae
 		}
+		if r.noResend && res.StatusCode == http.StatusServiceUnavailable {
+			// A 503 may come after the request took effect: a resend would answer no secret.
+			return &APIError{Status: 0, Code: "outcome_unknown", Message: "the API answered 503 (" + ae.Message + "), so the request may have taken effect: a resend would return no secret. Check with GetApp, and rotate the app's secret if you didn't receive it", RetryAfter: ae.RetryAfter}
+		}
 		wait := ae.RetryAfter
 		if wait == 0 {
 			wait = time.Second
@@ -247,27 +250,52 @@ const (
 
 // App is a Workflows app.
 type App struct {
-	ID                   string                  `json:"id"`
-	Slug                 string                  `json:"slug"`
-	ResourceName         string                  `json:"resourceName"`
-	OrganizationID       string                  `json:"organizationId"`
-	ProjectID            string                  `json:"projectId"`
-	Name                 string                  `json:"name"`
-	Kind                 string                  `json:"kind"`
-	Endpoint             *string                 `json:"endpoint"`
-	SyncStatus           string                  `json:"syncStatus"`
-	Workflows            []protocol.WorkflowInfo `json:"workflows"`
-	MaxInvocationSeconds *int                    `json:"maxInvocationSeconds"`
-	ProtocolVersion      *string                 `json:"protocolVersion"`
-	SDK                  *protocol.SDKInfo       `json:"sdk"`
-	Deployment           *string                 `json:"deployment"`
-	Health               string                  `json:"health"`
-	LastSyncAt           *string                 `json:"lastSyncAt"`
-	CreatedAt            string                  `json:"createdAt"`
-	UpdatedAt            string                  `json:"updatedAt"`
-	Queue                *string                 `json:"queue,omitempty"`      // pull apps
-	Partitions           *int                    `json:"partitions,omitempty"` // pull apps
+	ID                   string        `json:"id"`
+	Slug                 string        `json:"slug"`
+	ResourceName         string        `json:"resourceName"`
+	OrganizationID       string        `json:"organizationId"`
+	ProjectID            string        `json:"projectId"`
+	Name                 string        `json:"name"`
+	Kind                 string        `json:"kind"`
+	Endpoint             *string       `json:"endpoint"`
+	SyncStatus           string        `json:"syncStatus"`
+	Workflows            []AppWorkflow `json:"workflows"`
+	MaxInvocationSeconds *int          `json:"maxInvocationSeconds"`
+	ProtocolVersion      *string       `json:"protocolVersion"`
+	SDK                  *SDKInfo      `json:"sdk"`
+	Deployment           *string       `json:"deployment"`
+	Health               string        `json:"health"`
+	LastSyncAt           *string       `json:"lastSyncAt"`
+	CreatedAt            string        `json:"createdAt"`
+	UpdatedAt            string        `json:"updatedAt"`
+	Queue                *string       `json:"queue,omitempty"`      // pull apps
+	Partitions           *int          `json:"partitions,omitempty"` // pull apps
 }
+
+// AppWorkflow is a workflow an app serves, as its sync (or a worker's announcement) recorded it.
+type AppWorkflow struct {
+	Name      string       `json:"name"`
+	Retry     *RetryPolicy `json:"retry,omitempty"`
+	TimeoutMs int64        `json:"timeoutMs,omitempty"`
+}
+
+// SDKInfo names the SDK an app's sync reported.
+type SDKInfo struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+}
+
+// RunError is a run's or step's recorded failure, as the API reports it.
+type RunError struct {
+	Code    string          `json:"code"`
+	Name    string          `json:"name"`
+	Message string          `json:"message"`
+	Data    json.RawMessage `json:"data,omitempty"`
+	Stack   string          `json:"stack,omitempty"`
+	Cause   *RunError       `json:"cause,omitempty"`
+}
+
+func (e *RunError) Error() string { return e.Code + ": " + e.Message }
 
 // AppWithSecret is a created app, or one whose secret was rotated. The signing secret is
 // returned once: an Idempotency-Key replay answers nil.
@@ -304,7 +332,14 @@ func (c *Client) CreateApp(ctx context.Context, name string, o CreateAppOptions)
 		body["partitions"] = o.Partitions
 	}
 	var out AppWithSecret
-	return &out, c.do(ctx, request{method: http.MethodPost, path: "/apps", body: body, key: o.IdempotencyKey, noResend: true, out: &out})
+	if err := c.do(ctx, request{method: http.MethodPost, path: "/apps", body: body, key: o.IdempotencyKey, noResend: true, out: &out}); err != nil {
+		return nil, err
+	}
+	if out.SigningSecret == nil && kind == AppKindPush && o.IdempotencyKey == "" {
+		// Only a replay answers no secret, and without a key of the caller's, that's ambiguous.
+		return &out, &APIError{Status: 0, Code: "outcome_unknown", Message: "the API created the app without returning its signing secret; rotate the secret with RotateSecret"}
+	}
+	return &out, nil
 }
 
 // GetApp reads an app.
@@ -335,30 +370,30 @@ func (c *Client) RotateSecret(ctx context.Context, appID string) (*AppWithSecret
 
 // RunStep is one step of a run.
 type RunStep struct {
-	Seq       int64               `json:"seq"`
-	StepID    string              `json:"stepId"`
-	Name      string              `json:"name"`
-	Kind      string              `json:"kind"`
-	Status    string              `json:"status"`
-	Attempt   int                 `json:"attempt"`
-	HasOutput bool                `json:"hasOutput"`
-	Error     *protocol.WireError `json:"error"`
+	Seq       int64     `json:"seq"`
+	StepID    string    `json:"stepId"`
+	Name      string    `json:"name"`
+	Kind      string    `json:"kind"`
+	Status    string    `json:"status"`
+	Attempt   int       `json:"attempt"`
+	HasOutput bool      `json:"hasOutput"`
+	Error     *RunError `json:"error"`
 }
 
 // WorkflowRun is a run of a workflow, as the API answers it. (Run is the step function.)
 type WorkflowRun struct {
-	ID          string              `json:"id"`
-	RunKey      *string             `json:"runKey"`
-	AppID       string              `json:"appId"`
-	Workflow    string              `json:"workflow"`
-	Status      string              `json:"status"`
-	Attempt     int                 `json:"attempt"`
-	Error       *protocol.WireError `json:"error"`
-	CauseStepID *string             `json:"causeStepId"`
-	Steps       []RunStep           `json:"steps"`
-	CreatedAt   string              `json:"createdAt"`
-	UpdatedAt   string              `json:"updatedAt"`
-	EndedAt     *string             `json:"endedAt"`
+	ID          string    `json:"id"`
+	RunKey      *string   `json:"runKey"`
+	AppID       string    `json:"appId"`
+	Workflow    string    `json:"workflow"`
+	Status      string    `json:"status"`
+	Attempt     int       `json:"attempt"`
+	Error       *RunError `json:"error"`
+	CauseStepID *string   `json:"causeStepId"`
+	Steps       []RunStep `json:"steps"`
+	CreatedAt   string    `json:"createdAt"`
+	UpdatedAt   string    `json:"updatedAt"`
+	EndedAt     *string   `json:"endedAt"`
 }
 
 // Terminal reports whether the run has ended.
@@ -502,14 +537,19 @@ func CompleteCallbackURL(ctx context.Context, httpc *http.Client, callbackURL st
 	if err != nil {
 		return err
 	}
+	// The URL's token is a credential: errors never include the URL.
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, callbackURL, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return errors.New("workflows: the callback URL isn't a URL")
 	}
 	req.Header.Set("Content-Type", "application/json")
 	res, err := httpc.Do(req)
 	if err != nil {
-		return err
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
+		return fmt.Errorf("workflows: completing the callback: %w", err)
 	}
 	data, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 	res.Body.Close()

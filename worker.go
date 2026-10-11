@@ -23,7 +23,7 @@ import (
 
 	"github.com/ezgamehost/workflows-sdk-go/internal/jsonx"
 	"github.com/ezgamehost/workflows-sdk-go/internal/live"
-	"github.com/ezgamehost/workflows-sdk-go/protocol"
+	"github.com/ezgamehost/workflows-sdk-go/internal/protocol"
 )
 
 // DefaultLiveURL is workflows-live, where pull workers poll.
@@ -229,7 +229,7 @@ func (w *Worker) Run(ctx context.Context) error {
 			continue
 		}
 		invs, receivedAt, serverDate, err := w.poll(ctx, min(w.o.MaxTasks, free))
-		if ctx.Err() != nil {
+		if err != nil && ctx.Err() != nil {
 			break
 		}
 		var ae *APIError
@@ -257,6 +257,8 @@ func (w *Worker) Run(ctx context.Context) error {
 				w.handle(execCtx, inv, receivedAt, serverDate)
 			}()
 		}
+		// Tasks a poll returned are started even when ctx ended meanwhile: they're ours now, and
+		// the shutdown below waits for them.
 	}
 	if !w.wait(w.o.ShutdownTimeout) {
 		stopExec()

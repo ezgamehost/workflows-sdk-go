@@ -6,7 +6,7 @@ import (
 	"io"
 
 	"github.com/ezgamehost/workflows-sdk-go/internal/jsonx"
-	"github.com/ezgamehost/workflows-sdk-go/protocol"
+	"github.com/ezgamehost/workflows-sdk-go/internal/protocol"
 )
 
 // encodeValue is the wire form of a step's result or a workflow's output: JSON. A value

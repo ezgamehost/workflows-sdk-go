@@ -15,8 +15,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ezgamehost/workflows-sdk-go/internal/jsonx"
 	"github.com/ezgamehost/workflows-sdk-go/internal/live"
-	"github.com/ezgamehost/workflows-sdk-go/protocol"
+	"github.com/ezgamehost/workflows-sdk-go/internal/protocol"
 )
 
 // How the runtime works (the design decision everything here rests on):
@@ -61,7 +62,7 @@ type call struct {
 	assigned bool
 
 	fn        func(StepContext) (json.RawMessage, error)
-	retry     RetryPolicy
+	retry     protocol.RetryPolicy
 	timeout   time.Duration
 	until     time.Time
 	produce   func(*executor) (json.RawMessage, error)
@@ -125,6 +126,11 @@ func (b *branch) call(c *call) reply {
 	if b.exiting.Load() || b.x.ended.Load() {
 		runtime.Goexit()
 	}
+	if b.x.inStep.Load() {
+		// A step's function called a step: the workflow is parked at that step, so the call can't
+		// be answered. The inner call fails (and with it, normally, the step).
+		return reply{err: NonRetriable(argumentError("steps can't be called inside a step's function; call them from the workflow"))}
+	}
 	if !b.busy.CompareAndSwap(false, true) {
 		b.x.misuse.Store(true)
 		runtime.Goexit()
@@ -148,7 +154,10 @@ type execOptions struct {
 	Cancelled <-chan struct{} // closed when a pull heartbeat reports the run is cancelling
 	Rand      io.Reader
 	APIBase   string // callback URLs when the invocation carries no endpoints.api
-	Logf      func(format string, args ...any)
+	// MaxResultBytes bounds the invocation's result (the transport's body cap): a result past it
+	// fails the run instead of being rebuilt on every redispatch. 0: 8 MiB.
+	MaxResultBytes int
+	Logf           func(format string, args ...any)
 }
 
 // DefaultAPIBase is the public API, on which callback URLs are built when an invocation doesn't
@@ -169,6 +178,9 @@ type executor struct {
 	events chan event
 	ended  atomic.Bool
 	misuse atomic.Bool
+	inStep atomic.Bool // a step's function is running
+	// hbCancel: a pull heartbeat reported the run is cancelling; no new inline step starts.
+	hbCancel atomic.Bool
 
 	journal      map[string]protocol.JournalEntry
 	pending      []*call   // parked calls, settled or not, kept for the exit replies
@@ -248,13 +260,27 @@ func execute(ctx context.Context, inv *protocol.Invocation, wf *definition, io l
 	x.started = x.now()
 	x.info = RunInfo{ID: inv.Run.ID, RunKey: inv.Run.RunKey, Workflow: inv.Run.Workflow, Attempt: inv.Run.Attempt}
 	if s := inv.Run.Schedule; s != nil {
-		cp := *s
-		x.info.Schedule = &cp
+		x.info.Schedule = &ScheduleInfo{ID: s.ID, ScheduledTime: s.ScheduledTime}
 	}
 	x.cancelCtx, x.cancelFn = context.WithCancel(context.WithoutCancel(ctx))
 	defer x.cancelFn()
 	if inv.Cancel != nil {
 		x.cancelFn() // ctx.Done() is closed for the whole of a cancelling invocation
+	}
+	if o.Cancelled != nil {
+		stop := make(chan struct{})
+		defer close(stop)
+		go func() {
+			select {
+			case <-o.Cancelled:
+				x.hbCancel.Store(true)
+				x.cancelFn()
+			case <-stop:
+			}
+		}()
+	}
+	if x.o.MaxResultBytes <= 0 {
+		x.o.MaxResultBytes = 8 << 20
 	}
 	if err := x.load(ctx); err != nil {
 		return nil, err
@@ -268,11 +294,11 @@ func (x *executor) logf(format string, args ...any) {
 	}
 }
 
-func (x *executor) defaultRetry() RetryPolicy {
+func (x *executor) defaultRetry() protocol.RetryPolicy {
 	if x.wf.retry != nil {
 		return *x.wf.retry
 	}
-	return DefaultRetry
+	return protocol.DefaultRetry
 }
 
 // load pages the rest of an incomplete journal and fetches offloaded outputs (eight at a time)
@@ -618,11 +644,15 @@ func (x *executor) loop(ctx context.Context) ([]protocol.Command, error) {
 		if x.misuse.Load() {
 			x.setFatal(argumentError("a workflow called steps from two goroutines at once; use workflows.Parallel or workflows.Race for concurrent steps, each branch with its own Context"))
 		}
+		if (x.fatal != nil || x.finished) && x.inv.Kind == protocol.InvocationStep {
+			// A step invocation never ends the run: it runs its target or nothing.
+			return x.end(nil), nil
+		}
 		if x.fatal != nil {
 			return x.end([]protocol.Command{{Type: protocol.CommandRunFailed, Error: x.fatal}}), nil
 		}
 		if x.finished {
-			return x.end(x.terminal()), nil
+			return x.finish(x.terminal()), nil
 		}
 		if x.applyCompletion() {
 			continue
@@ -700,9 +730,11 @@ func (x *executor) loop(ctx context.Context) ([]protocol.Command, error) {
 			inline, attempt, cmds = x.sequential(c)
 		}
 		if inline == nil {
-			return x.end(cmds), nil
+			return x.finish(cmds), nil
 		}
-		if x.executed >= x.o.MaxSteps || !x.timeLeftOK() {
+		if x.executed >= x.o.MaxSteps || !x.timeLeftOK() || x.hbCancel.Load() {
+			// The budget, the deadline, or a heartbeat that reported a cancel: the next invocation
+			// carries on (with the cancel).
 			return x.end(nil), nil
 		}
 		failed, err := x.runStep(ctx, inline, attempt)
@@ -864,7 +896,8 @@ func (x *executor) runStep(ctx context.Context, c *call, attempt int) (*protocol
 		return nil, nil
 	}
 	w := encodeError(err)
-	cmd := protocol.Command{Type: protocol.CommandStepFailed, StepID: c.stepID, Name: c.name, Attempt: attempt, Error: w, Retryable: !isNonRetriable(w)}
+	retryable := !errors.Is(err, ErrNonRetriable) && !errors.Is(err, ErrOutputTooLarge) && !isNonRetriable(w)
+	cmd := protocol.Command{Type: protocol.CommandStepFailed, StepID: c.stepID, Name: c.name, Attempt: attempt, Error: w, Retryable: retryable}
 	var ra *retryAfter
 	if errors.As(err, &ra) {
 		ms := ra.delay.Milliseconds()
@@ -886,16 +919,18 @@ func (s *stepCtx) IdempotencyKey() string { return s.key }
 // step then fails with workflows.step_timeout at once), at the invocation's deadline, and when a
 // pull heartbeat reports the run is cancelling.
 func (x *executor) runFn(ctx context.Context, c *call, attempt int) (json.RawMessage, error) {
-	base, cancel := context.WithDeadline(context.WithoutCancel(ctx), x.o.Deadline)
+	withCause, cancelCause := context.WithCancelCause(context.WithoutCancel(ctx))
+	defer cancelCause(nil)
+	base, cancel := context.WithDeadline(withCause, x.o.Deadline)
 	defer cancel()
 	stopWatch := make(chan struct{})
 	defer close(stopWatch)
 	go func() {
 		select {
 		case <-x.o.Cancelled:
-			cancel()
+			cancelCause(ErrCancelled) // context.Cause(sc) is ErrCancelled
 		case <-ctx.Done():
-			cancel()
+			cancelCause(context.Cause(ctx))
 		case <-stopWatch:
 		}
 	}()
@@ -913,13 +948,21 @@ func (x *executor) runFn(ctx context.Context, c *call, attempt int) (json.RawMes
 		err error
 	}
 	done := make(chan result, 1)
+	x.inStep.Store(true)
+	defer x.inStep.Store(false)
 	go func() {
+		returned := false
 		defer func() {
-			if r := recover(); r != nil {
+			switch r := recover(); {
+			case r != nil:
 				done <- result{err: &Error{Code: "user", Name: "panic", Message: fmt.Sprint(r)}}
+			case !returned:
+				// runtime.Goexit in the step's function (t.FailNow, say): the step fails.
+				done <- result{err: NonRetriable(argumentError("step %q's function ended its goroutine (runtime.Goexit) without returning", c.name))}
 			}
 		}()
 		out, err := c.fn(sc)
+		returned = true
 		done <- result{out, err}
 	}()
 	stepTimeout := func() error {
@@ -1036,19 +1079,47 @@ func (x *executor) end(cmds []protocol.Command) []protocol.Command {
 			}
 		case <-timer.C:
 			x.logf("workflows: %d workflow goroutines didn't end within %v of the invocation's end (a deferred function blocks?)", x.live, exitWait)
-			go drain(x.events)
+			go drain(x.events, x.live)
 			return out
 		}
 	}
 	return out
 }
 
-// drain answers whatever the abandoned branches still send, so they can end.
-func drain(events chan event) {
-	for ev := range events {
-		if ev.park != nil && !ev.park.settled {
+// drain answers whatever the abandoned branches still send, so they can end, and returns once
+// the last of them has.
+func drain(events chan event, live int) {
+	for live > 0 {
+		ev := <-events
+		switch {
+		case ev.park != nil && !ev.park.settled:
 			ev.park.settled = true
 			ev.park.reply <- reply{exit: true}
+		case ev.done != nil:
+			live--
 		}
 	}
+}
+
+// finish is end for an orchestration's last commands, checked against what the engine and the
+// transport accept: a plan of more than 1,000 steps, or a result past the body cap, fails the run
+// non-retriably instead of being rebuilt on every redispatch.
+func (x *executor) finish(cmds []protocol.Command) []protocol.Command {
+	for _, c := range cmds {
+		if c.Type == protocol.CommandPlanParallel && len(c.Steps) > protocol.MaxPlannedSteps {
+			return x.end([]protocol.Command{{Type: protocol.CommandRunFailed, Error: encodeError(NonRetriable(fmt.Errorf(
+				"the workflow started %d steps at once; at most %d can be planned together (fan out through child workflows)", len(c.Steps), protocol.MaxPlannedSteps)))}})
+		}
+	}
+	size := 0
+	for _, c := range append(append([]protocol.Command(nil), x.outbox...), cmds...) {
+		if b, err := jsonx.Marshal(c); err == nil {
+			size += len(b) + 1
+		}
+	}
+	if size+1024 > x.o.MaxResultBytes {
+		return x.end([]protocol.Command{{Type: protocol.CommandRunFailed, Error: encodeError(NonRetriable(fmt.Errorf(
+			"the invocation's commands are %d bytes of JSON, more than the %d the transport takes (child inputs and outputs are at most 1 MiB each; fewer at once fit)", size, x.o.MaxResultBytes)))}})
+	}
+	return x.end(cmds)
 }

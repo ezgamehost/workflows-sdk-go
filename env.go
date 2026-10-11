@@ -3,7 +3,7 @@ package workflows
 import (
 	"os"
 
-	"github.com/ezgamehost/workflows-sdk-go/protocol"
+	"github.com/ezgamehost/workflows-sdk-go/internal/protocol"
 )
 
 // detectDeployment is the platform's deployment ID, recorded with each invocation (design,

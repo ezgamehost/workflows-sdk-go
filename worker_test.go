@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ezgamehost/workflows-sdk-go/protocol"
+	"github.com/ezgamehost/workflows-sdk-go/internal/protocol"
 )
 
 const (
@@ -216,7 +216,7 @@ func TestWorkerRunsPolledInvocationAndCompletes(t *testing.T) {
 
 func TestWorkerPollBody(t *testing.T) {
 	f := newFakeLive(t)
-	wf := New("tuned", func(ctx Context, _ none) (int, error) { return 1, nil }, WithRetry(RetryPolicy{MaxAttempts: 2}))
+	wf := New("tuned", func(ctx Context, _ none) (int, error) { return 1, nil }, WithRetry(attempts(2)))
 	startWorker(t, f, WorkerOptions{Workflows: []Workflow{wf}, Queue: "conformance", WorkerID: "w-1", MaxTasks: 3})
 	deadline := time.Now().Add(3 * time.Second)
 	for {

@@ -17,19 +17,29 @@ permissions:
   contents: read
 
 jobs:
+  # Both supported Go releases: go.mod declares the older one.
   check:
+    name: check (go ${{ matrix.go }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ["1.26.x", "1.27.x"]
+    env:
+      GOTOOLCHAIN: local
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version: ${{ matrix.go }}
       - name: gofmt
         run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
       - run: go vet ./...
-      - run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
+      - if: matrix.go == '1.27.x'
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
+      - run: go build ./...
       - run: go test -race ./...
       - name: no runtime dependencies
         run: test "$(go list -m all | wc -l)" -eq 1
@@ -71,7 +81,7 @@ jobs:
       - if: steps.token.outputs.present == 'true'
         uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version-file: .workflows-stack/go.mod
           cache-dependency-path: .workflows-stack/go.sum
       - if: steps.token.outputs.present == 'true'
         name: vendored vectors match workflows-stack
@@ -138,7 +148,7 @@ jobs:
       - if: steps.token.outputs.present == 'true'
         uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version-file: .workflows-stack/go.mod
           cache-dependency-path: .workflows-stack/go.sum
       - if: steps.token.outputs.present == 'true'
         name: S3 fixture (workflows-stack's SeaweedFS image)

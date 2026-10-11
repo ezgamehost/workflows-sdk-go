@@ -10,7 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/ezgamehost/workflows-sdk-go/internal/jsonx"
-	"github.com/ezgamehost/workflows-sdk-go/protocol"
+	"github.com/ezgamehost/workflows-sdk-go/internal/protocol"
 )
 
 // Error is a workflow error with a code and JSON data: what a recorded failure is rebuilt as on

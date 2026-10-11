@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ezgamehost/workflows-sdk-go/protocol"
+	"github.com/ezgamehost/workflows-sdk-go/internal/protocol"
 )
 
 var cp = protocol.Checkpoint{InvocationID: "inv_aaaqeayeaudaocajbifqydiob4", Seq: 1, Commands: []protocol.Command{}}

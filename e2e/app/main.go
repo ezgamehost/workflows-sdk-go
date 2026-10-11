@@ -75,6 +75,13 @@ func step[T any](ctx workflows.Context, name string, v T) (T, error) {
 	return workflows.Run(ctx, name, func(workflows.StepContext) (T, error) { return v, nil })
 }
 
+// retry is DefaultRetry with maxAttempts and a 200 ms first delay.
+func retry(maxAttempts int) workflows.RetryPolicy {
+	p := workflows.DefaultRetry
+	p.MaxAttempts, p.Initial = maxAttempts, 200*time.Millisecond
+	return p
+}
+
 func pushWorkflows() []workflows.Workflow {
 	return []workflows.Workflow{
 		workflows.New("e2e-complete", func(ctx workflows.Context, _ none) (map[string]int, error) {
@@ -104,7 +111,7 @@ func pushWorkflows() []workflows.Workflow {
 					return 0, fmt.Errorf("attempt %d", n)
 				}
 				return attemptOf(sc), nil
-			}, workflows.WithStepRetry(workflows.RetryPolicy{MaxAttempts: 5, InitialMs: 200}))
+			}, workflows.WithStepRetry(retry(5)))
 		}),
 		workflows.New("e2e-crash", func(ctx workflows.Context, _ none) (string, error) {
 			return workflows.Run(ctx, "crashy", func(sc workflows.StepContext) (string, error) {
@@ -112,7 +119,7 @@ func pushWorkflows() []workflows.Workflow {
 					os.Exit(1)
 				}
 				return "survived", nil
-			}, workflows.WithStepRetry(workflows.RetryPolicy{MaxAttempts: 3, InitialMs: 200}))
+			}, workflows.WithStepRetry(retry(3)))
 		}),
 		workflows.New("e2e-cancel", func(ctx workflows.Context, _ none) (string, error) {
 			err := workflows.Sleep(ctx, "wait", time.Hour)

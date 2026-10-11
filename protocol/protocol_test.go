@@ -3,121 +3,62 @@ package protocol
 import (
 	"encoding/json"
 	"errors"
-	"strings"
+	"os"
 	"testing"
 	"time"
-	"unicode/utf8"
 )
 
-func TestTruncateUTF8NeverSplitsACharacter(t *testing.T) {
-	s := strings.Repeat("é", 5000) // 10,000 bytes
-	got := TruncateUTF8(s, 8192)
-	if len(got) > 8192 || !strings.HasPrefix(s, got) || len(got)%2 != 0 {
-		t.Fatalf("len %d", len(got))
+func TestSignatureVectors(t *testing.T) {
+	var f struct {
+		Sign []struct {
+			Secrets []string
+			T       int64
+			Body    string
+			Header  string
+		}
+		Verify []struct {
+			Secrets []string
+			Header  string
+			Body    string
+			Now     int64
+			Result  string
+		}
 	}
-	if got := TruncateUTF8("a\xffb", 10); !utf8.ValidString(got) {
-		t.Fatalf("invalid UTF-8 kept: %q", got)
+	b, err := os.ReadFile("../testdata/vectors/signatures.json")
+	if err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestParseSignatureLimits(t *testing.T) {
-	now := time.Unix(1_800_000_000, 0)
-	if _, err := ParseSignature(strings.Repeat("v1=", 400), now); err == nil {
-		t.Fatal("an over-long header was accepted")
+	if err := json.Unmarshal(b, &f); err != nil || len(f.Sign) == 0 || len(f.Verify) == 0 {
+		t.Fatalf("vectors: %v", err)
 	}
-	parts := []string{"t=1800000000"}
-	for i := 0; i < 9; i++ {
-		parts = append(parts, "v1="+strings.Repeat("a", 64))
+	keys := func(secrets []string) [][]byte {
+		var out [][]byte
+		for _, s := range secrets {
+			k, err := DecodeSecret(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, k)
+		}
+		return out
 	}
-	if _, err := ParseSignature(strings.Join(parts, ","), now); err == nil {
-		t.Fatal("nine signatures were accepted")
+	for _, c := range f.Sign {
+		if got := Sign(keys(c.Secrets), time.Unix(c.T, 0), []byte(c.Body)); got != c.Header {
+			t.Errorf("Sign = %s, want %s", got, c.Header)
+		}
 	}
-	if _, err := ParseSignature("t=+123,v1="+strings.Repeat("a", 64), now); err == nil {
-		t.Fatal("t=+123 was accepted")
-	}
-	reason := func(h string) string {
-		_, err := ParseSignature(h, now)
+	for i, c := range f.Verify {
+		err := Verify(c.Header, keys(c.Secrets), []byte(c.Body), time.Unix(c.Now, 0))
+		got := "ok"
 		var se *SignatureError
 		if errors.As(err, &se) {
-			return se.Reason
+			got = se.Reason
 		}
-		return "ok"
-	}
-	if r := reason("t=1799999000,v1=" + strings.Repeat("a", 64)); r != "expired" {
-		t.Fatalf("an old signature is %s", r)
-	}
-	if r := reason("t=1800000999,v1=" + strings.Repeat("a", 64)); r != "expired" {
-		t.Fatalf("a future-dated signature is %s", r)
-	}
-	if r := reason("t=1800000300,v1=" + strings.Repeat("a", 64)); r != "ok" {
-		t.Fatalf("a signature 300 s ahead is %s", r)
-	}
-}
-
-func TestDecodeSecretStrict(t *testing.T) {
-	for _, s := range []string{"", "whsec_", "sk_" + strings.Repeat("A", 43), "whsec_" + strings.Repeat("A", 42) + "B"} {
-		if _, err := DecodeSecret(s); err == nil {
-			t.Errorf("%q accepted", s)
+		if got != c.Result {
+			t.Errorf("verify[%d]: %s, want %s", i, got, c.Result)
 		}
 	}
-}
-
-func TestBackoffNeverOverflows(t *testing.T) {
-	p := RetryPolicy{MaxAttempts: 100, InitialMs: 86_400_000, MaxMs: 86_400_000, Multiplier: 10}
-	if d := p.Backoff(100); d != 86_400_000*time.Millisecond {
-		t.Fatalf("%v", d)
-	}
-}
-
-func TestValidateCaps(t *testing.T) {
-	sid := StepID("a", 0)
-	until := time.Unix(1791547200, 0)
-	for name, c := range map[string]Command{
-		"name 257 bytes":     {Type: CommandStepCompleted, StepID: sid, Name: strings.Repeat("n", 257)},
-		"name 129 é":         {Type: CommandStepCompleted, StepID: sid, Name: strings.Repeat("é", 129)},
-		"NUL in name":        {Type: CommandStepCompleted, StepID: sid, Name: "a\x00"},
-		"value over 64 KiB":  {Type: CommandValueRecorded, StepID: sid, Name: "a", Value: []byte(`"` + strings.Repeat("v", 64<<10) + `"`)},
-		"error depth 9":      {Type: CommandRunFailed, Error: chain(9)},
-		"message over 8 KiB": {Type: CommandRunFailed, Error: &WireError{Code: "user", Name: "E", Message: strings.Repeat("m", 8193)}},
-		"custom code":        {Type: CommandRunFailed, Error: &WireError{Code: "http.418", Name: "E", Message: "m"}},
-		"token elsewhere":    {Type: CommandSleep, StepID: sid, Name: "a", Until: &until, Token: "201.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"},
-		"duplicate planned":  {Type: CommandPlanParallel, Steps: []PlannedStep{{StepID: sid, Name: "a"}, {StepID: sid, Name: "a"}}},
-		"callback timeout 0": {Type: CommandCallbackCreated, StepID: sid, Name: "a", Token: "201.AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"},
-	} {
-		if err := c.Validate(); !errors.Is(err, ErrInvalid) {
-			t.Errorf("%s: %v", name, err)
-		}
-	}
-	if err := (Command{Type: CommandRunFailed, Error: chain(8)}).Validate(); err != nil {
-		t.Errorf("depth 8: %v", err)
-	}
-	if err := (InvocationResult{Deployment: strings.Repeat("d", 257)}).Validate(); !errors.Is(err, ErrInvalid) {
-		t.Error("a 257-byte deployment validated")
-	}
-	if got := CleanDeployment(strings.Repeat("é", 200) + "\x00"); len(got) > MaxDeploymentLen || strings.Contains(got, "\x00") {
-		t.Errorf("CleanDeployment: %d bytes", len(got))
-	}
-}
-
-func chain(n int) *WireError {
-	var e *WireError
-	for i := 0; i < n; i++ {
-		e = &WireError{Code: "user", Name: "E", Message: "m", Cause: e}
-	}
-	return e
-}
-
-func TestStepFailedAlwaysCarriesRetryable(t *testing.T) {
-	b, err := marshal(Command{Type: CommandStepFailed, StepID: "s", Name: "n", Attempt: 1, Error: &WireError{Code: "user", Name: "E", Message: "<m>"}})
-	if err != nil || string(b) != `{"type":"stepFailed","stepId":"s","name":"n","attempt":1,"error":{"code":"user","name":"E","message":"<m>"},"retryable":false}` {
-		t.Fatalf("%s %v", b, err)
-	}
-	b, _ = marshal(Command{Type: CommandStepCompleted, StepID: "s", Name: "n", Output: json.RawMessage(`"<&>"`)})
-	if string(b) != `{"type":"stepCompleted","stepId":"s","name":"n","output":"<&>"}` {
-		t.Fatalf("%s", b)
-	}
-	var back Command
-	if err := json.Unmarshal([]byte(`{"type":"stepFailed","retryable":true}`), &back); err != nil || !back.Retryable {
-		t.Fatal(err)
+	if v := Versions(); len(v) != 2 || v[0] != "1.0" || v[1] != "1.1" || Version != "1.1" {
+		t.Fatalf("versions %v %s", v, Version)
 	}
 }

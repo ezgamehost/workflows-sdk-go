@@ -99,11 +99,21 @@ Steps are package functions that take the workflow's `Context`:
   names (or IDs), or the run fails with `workflows.duplicate_step_name`.
 - **Delivery is at least once.** A step can run again after a crash. Use
   `sc.IdempotencyKey()` (`<runId>:<stepId>:<attempt>`) with the systems you call.
-- **Retries:** 5 attempts, 1 s apart doubling to at most 10 minutes, by default.
-  `WithStepRetry(RetryPolicy{…})` and `WithStepTimeout(d)` change one step; `WithRetry` and
-  `WithTimeout` on `New` change a workflow's default. Zero fields take the defaults.
+- **Retries:** 5 attempts, 1 s apart doubling to at most 10 minutes, by default
+  (`DefaultRetry`). `WithStepRetry(p)` and `WithStepTimeout(d)` change one step; `WithRetry` and
+  `WithTimeout` on `New` change a workflow's default. A policy is used as given, zero fields
+  included, so start from the default:
+
+  ```go
+  p := workflows.DefaultRetry
+  p.MaxAttempts, p.Initial = 3, 0 // retry at once, twice
+  workflows.Run(ctx, "charge", charge, workflows.WithStepRetry(p))
+  ```
 - **The step's context** (`StepContext`) is cancelled at the step's timeout, at the invocation's
-  deadline, and, in a pull worker, when the run is being cancelled.
+  deadline, and, in a pull worker, when the run is being cancelled (`context.Cause` is then
+  `ErrCancelled`).
+- **A step's function can't call steps.** Calling one with the workflow's `Context` from inside a
+  step's function returns an error, which fails the step non-retriably.
 
 ## Errors
 
@@ -236,7 +246,8 @@ Code outside steps runs again on every invocation, so keep it deterministic and 
 effects.
 
 - **Call steps only from the workflow's goroutine, or from a `Parallel`/`Race` branch with the
-  branch's `Context`.** Calling steps from goroutines you start yourself fails the run.
+  branch's `Context`.** Calling steps from goroutines you start yourself fails the run, and
+  calling them from inside a step's function fails that step.
 - **Deferred functions run when an invocation suspends.** At a sleep, a wait or planned parallel
   steps, the workflow's goroutine ends with `runtime.Goexit`, so a step call never returns and
   `defer`s run. Keep side effects in steps; a step called from a `defer` while suspending records
@@ -256,6 +267,8 @@ effects.
 | A step timeout | 1 ms to 15 minutes |
 | Retries | 1–100 attempts, at most 24 hours apart, multiplier 1–10 |
 | An invocation body (push) | 8 MiB |
+| An invocation's result | 16 MiB (push), 8 MiB (pull); more fails the run |
+| Steps planned together (`Parallel`) | 1,000; more fails the run (fan out through children) |
 | Steps run inline per invocation | 50 (`MaxStepsPerInvocation`) |
 | Concurrent step invocations per run | 32 |
 | Child workflow depth | 10 |
@@ -263,10 +276,13 @@ effects.
 
 ## The protocol package
 
-`github.com/ezgamehost/workflows-sdk-go/protocol` holds the wire protocol (version 1.1):
-messages, signature signing and verification (`Verify`), step IDs and tokens. It's checked
-against workflows-stack's protocol vectors (`testdata/vectors`), and `Validate` methods mirror the
-engine's limits; the SDK checks every message it sends with them.
+`github.com/ezgamehost/workflows-sdk-go/protocol` holds what an app may need on its own: the
+protocol versions and the `EZGH-Signature` on push invocations (`DecodeSecret`, `Sign`,
+`ParseSignature`, `Verify`), for apps that verify signatures themselves; `Handler` already does.
+The rest of the wire model is internal. It's checked against workflows-stack's protocol vectors
+(`testdata/vectors`), and the SDK validates every message it sends against the engine's limits.
+
+The SDK supports the two latest Go releases (go.mod declares Go 1.26); CI builds and tests both.
 
 ## Verification
 

@@ -16,6 +16,14 @@ func step[T any](ctx workflows.Context, name string, v T, opts ...workflows.Step
 	return workflows.Run(ctx, name, func(workflows.StepContext) (T, error) { return v, nil }, opts...)
 }
 
+// retry is DefaultRetry with maxAttempts and the first delay changed (workflows.md's partial
+// policies: the rest comes from the defaults).
+func retry(maxAttempts int, initial time.Duration) workflows.RetryPolicy {
+	p := workflows.DefaultRetry
+	p.MaxAttempts, p.Initial = maxAttempts, initial
+	return p
+}
+
 // all is protocol/conformance/workflows.md in Go, in its order (the order of the sync reply).
 func all() []workflows.Workflow {
 	return []workflows.Workflow{
@@ -63,7 +71,7 @@ func all() []workflows.Workflow {
 		workflows.New("flaky", func(ctx workflows.Context, _ none) (none, error) {
 			_, err := workflows.Run(ctx, "flaky", func(workflows.StepContext) (int, error) {
 				return 0, &workflows.Error{Code: "user", Name: "Error", Message: "boom", Data: json.RawMessage(`{"n":1}`)}
-			}, workflows.WithStepRetry(workflows.RetryPolicy{MaxAttempts: 3, InitialMs: 10}))
+			}, workflows.WithStepRetry(retry(3, 10*time.Millisecond)))
 			return nil, err
 		}),
 		workflows.New("fatal", func(ctx workflows.Context, _ none) (none, error) {
@@ -132,7 +140,7 @@ func all() []workflows.Workflow {
 		}),
 		workflows.New("tuned", func(ctx workflows.Context, _ none) (int, error) {
 			return step(ctx, "t", 1)
-		}, workflows.WithRetry(workflows.RetryPolicy{MaxAttempts: 2})),
+		}, workflows.WithRetry(retry(2, time.Second))),
 		workflows.New("effect", func(ctx workflows.Context, in struct {
 			URL string `json:"url"`
 		}) (string, error) {

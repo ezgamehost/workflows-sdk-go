@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ezgamehost/workflows-sdk-go/protocol"
+	"github.com/ezgamehost/workflows-sdk-go/internal/protocol"
 )
 
 type fakeIO struct {
@@ -106,3 +106,10 @@ func step[T any](ctx Context, name string, v T, opts ...StepOption) (T, error) {
 }
 
 type none = json.RawMessage
+
+// attempts is DefaultRetry with MaxAttempts n.
+func attempts(n int) RetryPolicy {
+	p := DefaultRetry
+	p.MaxAttempts = n
+	return p
+}

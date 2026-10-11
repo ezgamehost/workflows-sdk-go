@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/ezgamehost/workflows-sdk-go/internal/live"
-	"github.com/ezgamehost/workflows-sdk-go/protocol"
+	"github.com/ezgamehost/workflows-sdk-go/internal/protocol"
 )
 
 func sequenceWF() Workflow {
@@ -107,7 +107,7 @@ func TestParallelPlansNewStepsTogether(t *testing.T) {
 			t.Fatalf("got %s", show(cmds))
 		}
 		for j, s := range cmds[0].Steps {
-			if s.StepID != protocol.StepID("p"+string(rune('0'+j)), 0) || s.Retry == nil || *s.Retry != DefaultRetry {
+			if s.StepID != protocol.StepID("p"+string(rune('0'+j)), 0) || s.Retry == nil || *s.Retry != protocol.DefaultRetry {
 				t.Fatalf("step %d: %s", j, show(s))
 			}
 		}
@@ -705,26 +705,25 @@ func TestPanicInWorkflowFailsTheRun(t *testing.T) {
 
 func TestCallingStepsFromAnotherGoroutineFails(t *testing.T) {
 	wf := New("misuse", func(ctx Context, _ none) (int, error) {
-		signal := make(chan struct{})
-		var wg sync.WaitGroup
-		wg.Add(1)
+		parked, called := make(chan struct{}), make(chan struct{})
 		go func() {
-			defer wg.Done()
-			<-signal
-			_, _ = step(ctx, "a", 1)
+			defer close(called)
+			<-parked
+			_, _ = step(ctx, "a", 1) // the workflow's goroutine is parked in Parallel: misuse
 		}()
-		_, err := Run(ctx, "b", func(StepContext) (int, error) {
-			close(signal)
-			time.Sleep(100 * time.Millisecond)
-			return 2, nil
+		err := Parallel(ctx, func(Context) error {
+			close(parked)
+			<-called
+			return nil
 		})
-		wg.Wait()
 		return 0, err
 	})
-	cmds := run(t, wf, invocation("misuse", nil), &fakeIO{})
-	last := cmds[len(cmds)-1]
-	if last.Type != "runFailed" || last.Error.Code != "user" || !strings.Contains(last.Error.Message, "workflows.Parallel") {
-		t.Fatalf("got %s", show(cmds))
+	for i := 0; i < 10; i++ {
+		cmds := run(t, wf, invocation("misuse", nil), &fakeIO{})
+		last := cmds[len(cmds)-1]
+		if last.Type != "runFailed" || last.Error.Code != "user" || !strings.Contains(last.Error.Message, "workflows.Parallel") {
+			t.Fatalf("got %s", show(cmds))
+		}
 	}
 }
 
@@ -795,7 +794,7 @@ func TestGoroutinesEndAfterEveryInvocation(t *testing.T) {
 }
 
 func TestWorkflowInfoCarriesTheFullPolicy(t *testing.T) {
-	wf := New("tuned", func(ctx Context, _ none) (int, error) { return step(ctx, "t", 1) }, WithRetry(RetryPolicy{MaxAttempts: 2}), WithTimeout(time.Minute))
+	wf := New("tuned", func(ctx Context, _ none) (int, error) { return step(ctx, "t", 1) }, WithRetry(attempts(2)), WithTimeout(time.Minute))
 	if got := show(wf.definition().info()); got != `{"name":"tuned","retry":{"maxAttempts":2,"initialMs":1000,"maxMs":600000,"multiplier":2},"timeoutMs":60000}` {
 		t.Fatalf("got %s", got)
 	}
@@ -840,5 +839,38 @@ func TestGroupsWithoutStepsAreDeterministic(t *testing.T) {
 		if show(cmds) != `[{"type":"runCompleted","output":1}]` {
 			t.Fatalf("iteration %d: %s", i, show(cmds))
 		}
+	}
+}
+
+func TestRetryPolicyZeroesAreValues(t *testing.T) {
+	p := DefaultRetry
+	p.Initial, p.Max = 0, 0
+	w, err := p.wire()
+	if err != nil || w.InitialMs != 0 || w.MaxMs != 0 || w.MaxAttempts != 5 {
+		t.Fatalf("%+v %v", w, err)
+	}
+	for name, bad := range map[string]RetryPolicy{
+		"partial":         {MaxAttempts: 3},
+		"sub-millisecond": {MaxAttempts: 3, Initial: time.Microsecond, Max: time.Second, Multiplier: 1},
+		"max over a day":  {MaxAttempts: 3, Max: 25 * time.Hour, Multiplier: 1},
+	} {
+		if _, err := bad.wire(); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	wf := New("zero", func(ctx Context, _ none) (int, error) {
+		p := DefaultRetry
+		p.Initial = 0
+		return Run(ctx, "s", func(StepContext) (int, error) { return 1, nil }, WithStepRetry(p))
+	})
+	io := &fakeIO{}
+	run(t, wf, invocation("zero", nil), io)
+	if r := io.checkpoints[0][0].Retry; r == nil || r.InitialMs != 0 || r.MaxMs != 600000 {
+		t.Fatalf("%s", show(io.checkpoints))
+	}
+	b, _ := json.Marshal(DefaultRetry)
+	var back RetryPolicy
+	if string(b) != `{"maxAttempts":5,"initialMs":1000,"maxMs":600000,"multiplier":2}` || json.Unmarshal(b, &back) != nil || back != DefaultRetry {
+		t.Fatalf("%s %+v", b, back)
 	}
 }

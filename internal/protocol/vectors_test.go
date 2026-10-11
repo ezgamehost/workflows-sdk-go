@@ -13,7 +13,7 @@ import (
 
 func load(t *testing.T, name string, v any) {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join("..", "testdata", "vectors", name))
+	b, err := os.ReadFile(filepath.Join("..", "..", "testdata", "vectors", name))
 	if err != nil {
 		t.Fatal(err)
 	}

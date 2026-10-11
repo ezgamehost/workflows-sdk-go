@@ -13,11 +13,14 @@ import (
 
 	"github.com/ezgamehost/workflows-sdk-go/internal/jsonx"
 	"github.com/ezgamehost/workflows-sdk-go/internal/live"
-	"github.com/ezgamehost/workflows-sdk-go/protocol"
+	"github.com/ezgamehost/workflows-sdk-go/internal/protocol"
 )
 
-// maxBody bounds an invocation's body.
-const maxBody = 8 << 20
+// maxBody bounds an invocation's body; maxResultBytes bounds the result dispatch reads back.
+const (
+	maxBody        = 8 << 20
+	maxResultBytes = 16 << 20
+)
 
 // HandlerOptions configures the push handler.
 type HandlerOptions struct {
@@ -197,7 +200,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	total := max(0, deadline.Sub(received))
 	lc := &live.Client{Base: inv.Endpoints.Live, Token: inv.Token, HTTP: h.httpc, Deadline: deadline, Reserve: max(5*time.Second, total/10), Now: h.now}
-	cmds, err := run1(r.Context(), inv, h.byName, lc, execOptions{Deadline: deadline, MaxSteps: h.maxSteps, Now: h.now, Logf: logf(h.log)})
+	cmds, err := run1(r.Context(), inv, h.byName, lc, execOptions{Deadline: deadline, MaxSteps: h.maxSteps, Now: h.now, Logf: logf(h.log), MaxResultBytes: maxResultBytes})
 	var cf *live.CheckpointFailed
 	switch {
 	case errors.Is(err, live.ErrSuperseded):

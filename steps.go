@@ -7,7 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/ezgamehost/workflows-sdk-go/internal/jsonx"
-	"github.com/ezgamehost/workflows-sdk-go/protocol"
+	"github.com/ezgamehost/workflows-sdk-go/internal/protocol"
 )
 
 // StepOption configures one step.
@@ -15,7 +15,7 @@ type StepOption func(*stepOpts) error
 
 type stepOpts struct {
 	id      string
-	retry   *RetryPolicy
+	retry   *protocol.RetryPolicy
 	timeout time.Duration
 }
 
@@ -31,9 +31,16 @@ func WithID(id string) StepOption {
 	}
 }
 
-// WithStepRetry sets the step's retry policy; zero fields take the workflow's default.
+// WithStepRetry sets the step's retry policy, used as given (start from DefaultRetry).
 func WithStepRetry(p RetryPolicy) StepOption {
-	return func(o *stepOpts) error { o.retry = &p; return nil }
+	return func(o *stepOpts) error {
+		w, err := p.wire()
+		if err != nil {
+			return argumentError("%v", err)
+		}
+		o.retry = &w
+		return nil
+	}
 }
 
 // WithStepTimeout sets the step's timeout: 1 ms to 15 minutes.
@@ -89,10 +96,7 @@ func Run[T any](ctx Context, name string, fn func(StepContext) (T, error), opts 
 	}
 	retry := b.x.defaultRetry()
 	if o.retry != nil {
-		retry = mergeRetry(retry, *o.retry)
-	}
-	if err := retry.Validate(); err != nil {
-		return zero, argumentError("%v", err)
+		retry = *o.retry
 	}
 	timeout := o.timeout
 	if timeout == 0 {

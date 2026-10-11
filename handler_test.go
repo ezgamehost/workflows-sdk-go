@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ezgamehost/workflows-sdk-go/protocol"
+	"github.com/ezgamehost/workflows-sdk-go/internal/protocol"
 )
 
 const (
@@ -22,7 +22,7 @@ const (
 func mustHandler(t *testing.T, o HandlerOptions) http.Handler {
 	t.Helper()
 	if o.Workflows == nil {
-		o.Workflows = []Workflow{sequenceWF(), New("tuned", func(ctx Context, _ none) (int, error) { return step(ctx, "t", 1) }, WithRetry(RetryPolicy{MaxAttempts: 2}))}
+		o.Workflows = []Workflow{sequenceWF(), New("tuned", func(ctx Context, _ none) (int, error) { return step(ctx, "t", 1) }, WithRetry(attempts(2)))}
 	}
 	if o.SigningSecrets == nil {
 		o.SigningSecrets = []string{"", testSecret}
@@ -197,5 +197,11 @@ func TestHandlerOptionsChecked(t *testing.T) {
 	}
 	if code, out, _ := serve(h, httptest.NewRequest(http.MethodPost, "/", nil)); code != 500 || out["code"] != "sdk_error" {
 		t.Fatalf("no usable secret: %d %v", code, out)
+	}
+}
+
+func TestSDKNameMatchesTheProtocol(t *testing.T) {
+	if SDKName != protocol.SDKName {
+		t.Fatal(SDKName)
 	}
 }
