@@ -20,7 +20,8 @@ type stepOpts struct {
 }
 
 // WithID gives the step an explicit ID (^[A-Za-z0-9._:-]{1,128}$) instead of one derived from
-// its name and occurrence. An explicit ID names one step for the whole run.
+// its name and occurrence: for Run, Sleep, SleepUntil, CreateCallback and Invoke (a child run's
+// ID derives from it). An explicit ID names one step for the whole run.
 func WithID(id string) StepOption {
 	return func(o *stepOpts) error {
 		if !protocol.ValidStepIDOverride(id) {
@@ -43,11 +44,11 @@ func WithStepRetry(p RetryPolicy) StepOption {
 	}
 }
 
-// WithStepTimeout sets the step's timeout: 1 ms to 15 minutes.
+// WithStepTimeout sets the step's timeout: 1 ms to 24 hours.
 func WithStepTimeout(d time.Duration) StepOption {
 	return func(o *stepOpts) error {
 		if d < time.Millisecond || d > MaxStepTimeout {
-			return argumentError("a step timeout is 1 ms to 15 minutes, got %v", d)
+			return argumentError("a step timeout is 1 ms to 24 hours, got %v", d)
 		}
 		o.timeout = d
 		return nil
@@ -65,6 +66,15 @@ func applyOpts(opts []StepOption) (stepOpts, error) {
 		}
 	}
 	return o, nil
+}
+
+// idOnly applies the options of a step that takes only WithID (a callback, a child run).
+func idOnly(opts []StepOption, what string) (stepOpts, error) {
+	o, err := applyOpts(opts)
+	if err == nil && (o.retry != nil || o.timeout != 0) {
+		err = argumentError("workflows.%s takes only WithID", what)
+	}
+	return o, err
 }
 
 func checkName(name string) error {
@@ -227,7 +237,7 @@ type Callback struct {
 // CreateCallback creates a callback whose timeout (1 second to 1 year) starts now. The callback
 // is recorded before CreateCallback returns, so the URL can be handed out at once (in a step).
 // Wait for it with WaitCallback.
-func CreateCallback(ctx Context, name string, timeout time.Duration) (*Callback, error) {
+func CreateCallback(ctx Context, name string, timeout time.Duration, opts ...StepOption) (*Callback, error) {
 	b, err := branchOf(ctx)
 	if err != nil {
 		return nil, err
@@ -238,7 +248,11 @@ func CreateCallback(ctx Context, name string, timeout time.Duration) (*Callback,
 	if timeout < time.Second || timeout > MaxSleep {
 		return nil, argumentError("a callback timeout is 1 second to 1 year, got %v", timeout)
 	}
-	c := &call{kind: kindCallbackCreate, name: name, timeoutMs: timeout.Milliseconds()}
+	o, err := idOnly(opts, "CreateCallback")
+	if err != nil {
+		return nil, err
+	}
+	c := &call{kind: kindCallbackCreate, name: name, explicit: o.id, timeoutMs: timeout.Milliseconds()}
 	r := b.call(c)
 	if r.err != nil {
 		return nil, r.err
@@ -271,7 +285,7 @@ func WaitCallback[T any](ctx Context, cb *Callback) (T, error) {
 // Invoke starts a child run of workflow (in the same app) with input (JSON, at most 1 MiB; nil
 // for none) and waits for it: it returns the child's output, or an error matching ErrChildFailed
 // whose cause is the child's error.
-func Invoke[T any](ctx Context, name, workflow string, input any) (T, error) {
+func Invoke[T any](ctx Context, name, workflow string, input any, opts ...StepOption) (T, error) {
 	var zero T
 	b, err := branchOf(ctx)
 	if err != nil {
@@ -296,7 +310,11 @@ func Invoke[T any](ctx Context, name, workflow string, input any) (T, error) {
 			in = nil
 		}
 	}
-	r := b.call(&call{kind: kindInvoke, name: name, workflow: workflow, input: in})
+	o, err := idOnly(opts, "Invoke")
+	if err != nil {
+		return zero, err
+	}
+	r := b.call(&call{kind: kindInvoke, name: name, explicit: o.id, workflow: workflow, input: in})
 	if r.err != nil {
 		return zero, r.err
 	}
@@ -318,6 +336,23 @@ func Parallel(ctx Context, branches ...func(Context) error) error {
 		}
 	}
 	return b.call(&call{kind: kindGroup, branches: branches}).err
+}
+
+// All runs each branch concurrently, like Parallel, but returns at the first error (the
+// branch's, as returned; the other branches keep running, as Race's losers do), or nil once every
+// branch has returned. It's Promise.all and asyncio.gather: use it when a failure should stop
+// the workflow at once, for example to run cleanup while siblings are still in flight.
+func All(ctx Context, branches ...func(Context) error) error {
+	b, err := branchOf(ctx)
+	if err != nil {
+		return err
+	}
+	for _, fn := range branches {
+		if fn == nil {
+			return argumentError("All's branches can't be nil")
+		}
+	}
+	return b.call(&call{kind: kindGroup, branches: branches, failFast: true}).err
 }
 
 // Race runs each branch concurrently and returns the index and error of the first to return,

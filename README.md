@@ -11,8 +11,8 @@ The SDK uses only the Go standard library.
 go get github.com/ezgamehost/workflows-sdk-go
 ```
 
-**Status:** in development. Verified end to end against workflows-stack `9624505`: the
-conformance harness (53 scenarios, push and pull) and the end-to-end suite (14 checks, phase 1 and
+**Status:** in development. Verified end to end against workflows-stack `830dcb9`: the
+conformance harness (55 scenarios, push and pull) and the end-to-end suite (14 checks, phase 1 and
 phase 2); see [Verification](#verification).
 
 ## Quick start
@@ -88,14 +88,15 @@ Steps are package functions that take the workflow's `Context`:
 | `Now(ctx, name)`, `UUID(ctx, name)` | A time or UUID recorded once, the same on every replay |
 | `CreateCallback(ctx, name, timeout)`, `WaitCallback[T](ctx, cb)` | A single-use callback URL, and waiting for its JSON body |
 | `Invoke[T](ctx, name, workflow, input)` | Starts a child run of a workflow in the same app and waits for its output |
-| `Parallel(ctx, branches...)`, `Race(ctx, branches...)` | Concurrent branches whose steps are planned together |
+| `Parallel(ctx, branches...)`, `All(ctx, branches...)`, `Race(ctx, branches...)` | Concurrent branches whose steps are planned together |
 
 - **Results are JSON.** A step's result is encoded to JSON and decoded back into `T`, live and on
   replay alike, so both are the same value. More than 1 MiB fails the step with
   `workflows.output_too_large`.
 - **Names identify steps.** A step's ID is derived from its name and how many times the name was
   used before, so a loop calling `Run(ctx, "send", …)` gets distinct steps. `WithID("…")` sets an
-  explicit ID, which names one step for the whole run. Two steps pending at once need different
+  explicit ID, which names one step for the whole run (on `Run`, `Sleep`, `CreateCallback` and
+  `Invoke`, whose child run ID derives from it, as in the other SDKs). Two steps pending at once need different
   names (or IDs), or the run fails with `workflows.duplicate_step_name`.
 - **Delivery is at least once.** A step can run again after a crash. Use
   `sc.IdempotencyKey()` (`<runId>:<stepId>:<attempt>`) with the systems you call.
@@ -145,7 +146,7 @@ if errors.Is(err, workflows.ErrCallbackTimeout) { /* … */ }
 retry as usual, within the grace period (default 5 minutes); any other step returns
 `ErrCancelled` at once. The run ends `cancelled` whatever the workflow returns.
 
-## Parallel and Race
+## Parallel, All and Race
 
 ```go
 var crm, billing string
@@ -160,6 +161,9 @@ err := workflows.Parallel(ctx,
   invocation (at most 32 at once per run).
 - `Parallel` returns once every branch has returned: nil, the one error, or the errors joined in
   branch order.
+- `All` returns at the first error (the other branches keep running), or nil once every branch has
+  returned: `Promise.all` and `asyncio.gather`. Use it when a failure, or a cancel, should reach the
+  workflow at once, for example to run cleanup while siblings are still in flight.
 - `Race` returns the index and error of the first branch to return, in the order EZGH recorded
   their steps, so a replay picks the same winner. The other branches keep running.
 
@@ -180,7 +184,7 @@ decision, err := workflows.WaitCallback[Decision](ctx, cb) // ErrCallbackTimeout
   body succeeds; a different body is `409 callback_completed`; after the timeout it's
   `410 callback_expired`.
 - `workflows.CompleteCallbackURL(ctx, httpClient, url, value)` posts to a callback URL without an
-  API key. `Client.CompleteCallback(ctx, runID, stepID, value)` completes one as an
+  API key. `Client.CompleteCallback(ctx, runID, stepID, value)` (which returns the run) completes one as an
   authenticated caller.
 
 ## Child workflows
@@ -221,13 +225,42 @@ w, err := workflows.NewWorker(workflows.WorkerOptions{
 err = w.Run(ctx) // until ctx is done; then it drains running invocations
 ```
 
-- The worker long-polls workflows-live and heartbeats while an invocation runs. A heartbeat that
-  reports the run is cancelling cancels the running step's context.
+- The worker long-polls workflows-live and heartbeats while an invocation runs, until its
+  result is in (`HeartbeatInterval`, default 20 s, at most 30 s; the engine's heartbeat timeout
+  is 60 s). A heartbeat that reports the run is cancelling cancels the running step's context.
+- **A pull invocation's deadline** is the app's longest announced workflow timeout (`WithTimeout`):
+  at least 15 minutes, at most 24 hours. Pull is for long steps; a push handler refuses a
+  workflow timeout longer than its `MaxInvocationSeconds`.
 - It retries 429, 5xx and network errors with backoff. It returns an `*APIError` when the poll is
   refused for good: 401 or 403 (the API key or its permissions), or another 4xx (the app or the
   queue).
-- `DevMode: true` polls the queue `dev-<user>`, so developers sharing a project never take each
-  other's runs.
+- On shutdown it stops polling, except that a poll whose answer has started arriving is read and
+  its tasks run, and waits up to `ShutdownTimeout` for running invocations.
+- **Dev mode:** `DevMode: true` polls the queue `dev-<user>`, so developers sharing a project
+  never take each other's runs. workflows-live serves only an app's own queue, so each developer
+  needs a pull app of their own: `Client.DevApp` creates it, or finds it, named and queued
+  `dev-<user>`:
+
+  ```go
+  app, err := c.DevApp(ctx, workflows.DevAppOptions{})
+  w, err := workflows.NewWorker(workflows.WorkerOptions{ /* … */ App: app.ID, DevMode: true})
+  ```
+
+## The client
+
+- **Retries:** a 429, a 503, a 409 `idempotency_in_progress` or a network error is retried after
+  its `Retry-After` (at most `MaxRetryDelay`, default 10 s). `ClientOptions.Retries` is how many
+  times: nil means the default, 3, and a pointer to 0 means none (`Retries: new(0)`). Writes are
+  resent with the same `Idempotency-Key`; `CreateApp` and `RotateSecret` never are, and answer
+  `outcome_unknown` instead, since a resend would return no secret.
+- **Redirects** are never followed, by the client, the push handler's calls to workflows-live or
+  the worker: a 3xx is an error answer, so a credential is never sent elsewhere.
+- **Times in inputs.** Go writes a `time.Time` as RFC 3339 with the fractional seconds it has
+  (`2026-10-10T12:00:00Z`); the TypeScript and Python SDKs write milliseconds
+  (`2026-10-10T12:00:00.000Z`). A run key's input is compared by its hash, so the same start from
+  two languages with a time in its input differs. When a time is part of a keyed start's input
+  (or a schedule's), send it as a string in one form, for example
+  `t.UTC().Format("2006-01-02T15:04:05.000Z07:00")`. The SDK doesn't rewrite your input.
 
 ## What a credential can do
 
@@ -264,7 +297,7 @@ effects.
 | An explicit step ID | `^[A-Za-z0-9._:-]{1,128}$` |
 | A workflow name | `^[A-Za-z0-9_-]{1,64}$` |
 | A sleep or a callback timeout | at most a year (a callback: at least 1 s) |
-| A step timeout | 1 ms to 15 minutes |
+| A step timeout | 1 ms to 24 hours (push: at most `MaxInvocationSeconds`) |
 | Retries | 1–100 attempts, at most 24 hours apart, multiplier 1–10 |
 | An invocation body (push) | 8 MiB |
 | An invocation's result | 16 MiB (push), 8 MiB (pull); more fails the run |

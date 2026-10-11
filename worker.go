@@ -160,11 +160,12 @@ func NewWorker(o WorkerOptions) (*Worker, error) {
 	if o.LiveURL == "" {
 		o.LiveURL = DefaultLiveURL
 	}
-	if o.HTTPClient == nil {
-		o.HTTPClient = &http.Client{Timeout: 70 * time.Second}
-	}
+	o.HTTPClient = noRedirects(o.HTTPClient)
 	if o.HeartbeatInterval <= 0 {
 		o.HeartbeatInterval = 20 * time.Second
+	}
+	if o.HeartbeatInterval > 30*time.Second {
+		return nil, errors.New("workflows.NewWorker: HeartbeatInterval is at most 30 s (the engine's heartbeat timeout is 60 s)")
 	}
 	if o.MaxPollBackoff <= 0 {
 		o.MaxPollBackoff = 30 * time.Second
@@ -297,7 +298,35 @@ func (w *Worker) poll(ctx context.Context, maxTasks int) ([]json.RawMessage, tim
 	if err != nil {
 		return nil, time.Time{}, time.Time{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, w.pollURL, bytes.NewReader(body))
+	// Shutdown aborts a poll that's still waiting, but not one whose answer has started to
+	// arrive: its tasks are leased to this worker, so it reads them (within ShutdownTimeout) and
+	// runs them.
+	pctx, pcancel := context.WithCancel(context.WithoutCancel(ctx))
+	defer pcancel()
+	arrived, finished := make(chan struct{}), make(chan struct{})
+	defer close(finished)
+	go func() {
+		select {
+		case <-finished:
+			return
+		case <-ctx.Done():
+		case <-arrived:
+			select {
+			case <-finished:
+				return
+			case <-ctx.Done():
+			}
+			t := time.NewTimer(w.o.ShutdownTimeout)
+			defer t.Stop()
+			select {
+			case <-finished:
+				return
+			case <-t.C:
+			}
+		}
+		pcancel()
+	}()
+	req, err := http.NewRequestWithContext(pctx, http.MethodPost, w.pollURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, time.Time{}, time.Time{}, &APIError{Status: http.StatusBadRequest, Code: "invalid_live_url", Message: err.Error()}
 	}
@@ -308,6 +337,7 @@ func (w *Worker) poll(ctx context.Context, maxTasks int) ([]json.RawMessage, tim
 	if err != nil {
 		return nil, time.Time{}, time.Time{}, err
 	}
+	close(arrived)
 	defer res.Body.Close()
 	receivedAt := time.Now()
 	data, err := io.ReadAll(io.LimitReader(res.Body, 64<<20))
@@ -380,9 +410,12 @@ func (w *Worker) handle(ctx context.Context, raw json.RawMessage, receivedAt, se
 			}
 		}
 	}()
+	// Heartbeats continue until complete returns, so a slow complete can't lose the invocation.
+	defer func() {
+		stopHB()
+		<-hbDone
+	}()
 	cmds, err := run1(ctx, inv, w.byName, lc, execOptions{Deadline: deadline, MaxSteps: w.o.MaxStepsPerInvocation, Cancelled: cancelled, APIBase: w.o.APIBaseURL, Logf: logf(w.log)})
-	stopHB()
-	<-hbDone
 	switch {
 	case superseded.Load() || errors.Is(err, live.ErrSuperseded):
 		return

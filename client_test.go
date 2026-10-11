@@ -125,7 +125,7 @@ func TestClientRoutes(t *testing.T) {
 	_, _ = c.Cancel(ctx, "r1", CancelOptions{GracePeriodSeconds: &two})
 	var raw json.RawMessage
 	_ = c.Output(ctx, "r1", &raw)
-	_ = c.CompleteCallback(ctx, "r1", "s1", "yes")
+	_, _ = c.CompleteCallback(ctx, "r1", "s1", "yes")
 	_, _ = c.CreateSchedule(ctx, ScheduleSpec{AppID: "a1", Workflow: "w", Name: "n", Cron: "* * * * *", IdempotencyKey: "ck"})
 	cron := "0 * * * *"
 	_, _ = c.UpdateSchedule(ctx, "s1", 3, ScheduleUpdate{Cron: &cron})

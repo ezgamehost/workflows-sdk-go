@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -261,7 +262,7 @@ func all() []workflows.Workflow {
 			return workflows.Run(ctx, "compute", func(workflows.StepContext) (float64, error) { return in.X * 2, nil })
 		}),
 		workflows.New("longstep", func(ctx workflows.Context, _ none) (string, error) {
-			return workflows.Run(ctx, "long", func(sc workflows.StepContext) (string, error) {
+			l, err := workflows.Run(ctx, "long", func(sc workflows.StepContext) (string, error) {
 				deadline := time.Now().Add(10 * time.Second)
 				for time.Now().Before(deadline) {
 					select {
@@ -272,6 +273,10 @@ func all() []workflows.Workflow {
 				}
 				return "done", nil
 			})
+			if err != nil {
+				return "", err
+			}
+			return step(ctx, "after", l)
 		}),
 		workflows.New("branches", func(ctx workflows.Context, _ none) (map[string]string, error) {
 			var a, b string
@@ -299,6 +304,30 @@ func all() []workflows.Workflow {
 				return nil, err
 			}
 			return map[string]string{"a": a, "b": b}, nil
+		}),
+		workflows.New("cancelfanout", func(ctx workflows.Context, _ none) (string, error) {
+			err := workflows.All(ctx,
+				func(c workflows.Context) error { _, err := step(c, "p0", 0); return err },
+				func(c workflows.Context) error { _, err := step(c, "p1", 1); return err },
+			)
+			if _, cerr := step(ctx, "cleanup", "cleaned"); cerr != nil {
+				return "", cerr
+			}
+			if err != nil {
+				return "", err
+			}
+			return "done", nil
+		}),
+		workflows.New("toowide", func(ctx workflows.Context, _ none) ([]int, error) {
+			out := make([]int, 1001)
+			branches := make([]func(workflows.Context) error, len(out))
+			for i := range branches {
+				branches[i] = func(c workflows.Context) (err error) {
+					out[i], err = step(c, "s"+strconv.Itoa(i), i)
+					return
+				}
+			}
+			return out, workflows.All(ctx, branches...)
 		}),
 	}
 }

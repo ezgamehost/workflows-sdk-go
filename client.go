@@ -32,10 +32,11 @@ type ClientOptions struct {
 	ProjectID      string
 	BaseURL        string       // default DefaultBaseURL
 	HTTPClient     *http.Client // default: a client with a 70 s timeout
-	// Retries is how many times a 429, 503 or network error is retried (default 3; negative: none),
-	// after Retry-After, at most MaxRetryDelay (default 10 s). Writes are resent with the same
+	// Retries is how many times a 429, a 503, a 409 idempotency_in_progress or a network error is
+	// retried, after Retry-After, at most MaxRetryDelay (default 10 s). nil means the default, 3;
+	// a pointer to 0 means none (new(0) in Go 1.26). Writes are resent with the same
 	// Idempotency-Key.
-	Retries       int
+	Retries       *int
 	MaxRetryDelay time.Duration
 }
 
@@ -68,19 +69,32 @@ func NewClient(o ClientOptions) (*Client, error) {
 		return nil, fmt.Errorf("workflows.NewClient: BaseURL: %w", err)
 	}
 	c := &Client{key: secret(o.APIKey), base: base + "/v1/organizations/" + url.PathEscape(o.OrganizationID) + "/projects/" + url.PathEscape(o.ProjectID),
-		httpc: o.HTTPClient, retries: 3, maxDelay: 10 * time.Second}
-	if o.Retries > 0 {
-		c.retries = o.Retries
-	} else if o.Retries < 0 {
-		c.retries = 0
+		httpc: noRedirects(o.HTTPClient), retries: 3, maxDelay: 10 * time.Second}
+	if o.Retries != nil {
+		if *o.Retries < 0 {
+			return nil, errors.New("workflows.NewClient: Retries is at least 0")
+		}
+		c.retries = *o.Retries
 	}
 	if o.MaxRetryDelay > 0 {
 		c.maxDelay = o.MaxRetryDelay
 	}
-	if c.httpc == nil {
-		c.httpc = &http.Client{Timeout: 70 * time.Second}
-	}
+
 	return c, nil
+}
+
+// noRedirects is httpc (or a client with a 70 s timeout) that never follows a redirect: the
+// API, workflows-live and callback URLs don't redirect, so a 3xx is an error answer, and a
+// credential is never sent elsewhere. The caller's client isn't modified.
+func noRedirects(httpc *http.Client) *http.Client {
+	var c http.Client
+	if httpc != nil {
+		c = *httpc
+	} else {
+		c.Timeout = 70 * time.Second
+	}
+	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &c
 }
 
 // APIError is an error answer from the Workflows API: the HTTP status and the platform's error
@@ -202,12 +216,13 @@ func (c *Client) do(ctx context.Context, r request) error {
 			return json.Unmarshal(data, r.out)
 		}
 		ae := apiError(res, data)
-		if (res.StatusCode != http.StatusTooManyRequests && res.StatusCode != http.StatusServiceUnavailable) || attempt >= c.retries {
-			return ae
-		}
 		if r.noResend && res.StatusCode == http.StatusServiceUnavailable {
 			// A 503 may come after the request took effect: a resend would answer no secret.
 			return &APIError{Status: 0, Code: "outcome_unknown", Message: "the API answered 503 (" + ae.Message + "), so the request may have taken effect: a resend would return no secret. Check with GetApp, and rotate the app's secret if you didn't receive it", RetryAfter: ae.RetryAfter}
+		}
+		inProgress := res.StatusCode == http.StatusConflict && ae.Code == "idempotency_in_progress"
+		if (res.StatusCode != http.StatusTooManyRequests && res.StatusCode != http.StatusServiceUnavailable && !inProgress) || attempt >= c.retries {
+			return ae
 		}
 		wait := ae.RetryAfter
 		if wait == 0 {
@@ -365,7 +380,81 @@ func (c *Client) Sync(ctx context.Context, appID string, o SyncOptions) (*App, e
 // error isn't resent, as for CreateApp.
 func (c *Client) RotateSecret(ctx context.Context, appID string) (*AppWithSecret, error) {
 	var out AppWithSecret
-	return &out, c.do(ctx, request{method: http.MethodPost, path: "/apps/" + pe(appID) + "/rotate-secret", body: map[string]any{}, noResend: true, out: &out})
+	if err := c.do(ctx, request{method: http.MethodPost, path: "/apps/" + pe(appID) + "/rotate-secret", body: map[string]any{}, noResend: true, out: &out}); err != nil {
+		return nil, err
+	}
+	if out.SigningSecret == nil {
+		return &out, &APIError{Status: 0, Code: "outcome_unknown", Message: "the API rotated the secret without returning it; rotate it again"}
+	}
+	return &out, nil
+}
+
+// AppsPage is a page of the project's apps.
+type AppsPage struct {
+	Apps       []App   `json:"apps"`
+	NextCursor *string `json:"nextCursor"`
+}
+
+// ListApps reads a page of the project's apps.
+func (c *Client) ListApps(ctx context.Context, o ListOptions) (*AppsPage, error) {
+	var out AppsPage
+	if err := c.do(ctx, request{method: http.MethodGet, path: "/apps" + query(o.Cursor, o.Limit), out: &out}); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// DevAppOptions: User names the developer (default $USER, $USERNAME or $LOGNAME, else the OS
+// user); Name is the app's name (default the queue, dev-<user>); Partitions as for CreateApp.
+type DevAppOptions struct {
+	User       string
+	Name       string
+	Partitions int
+}
+
+// DevApp creates, or finds, a developer's own pull app for dev mode: named (by default) and
+// queued DevQueue(user), so a worker with DevMode polls it. workflows-live serves only an app's
+// own queue, so each developer needs an app of their own. An app with that name that isn't a
+// pull app on that queue is a 409 app_exists.
+func (c *Client) DevApp(ctx context.Context, o DevAppOptions) (*App, error) {
+	user := o.User
+	if user == "" {
+		user = devUser()
+	}
+	queue := DevQueue(user)
+	name := o.Name
+	if name == "" {
+		name = queue
+	}
+	created, err := c.CreateApp(ctx, name, CreateAppOptions{Kind: AppKindPull, Queue: queue, Partitions: o.Partitions})
+	if err == nil {
+		return &created.App, nil
+	}
+	var ae *APIError
+	if !errors.As(err, &ae) || !((ae.Status == http.StatusConflict && ae.Code == "app_exists") || ae.Code == "outcome_unknown") {
+		return nil, err
+	}
+	// It exists, or the create's outcome is unknown: find it by name.
+	for cursor := ""; ; {
+		page, err := c.ListApps(ctx, ListOptions{Cursor: cursor, Limit: 100})
+		if err != nil {
+			return nil, err
+		}
+		for i := range page.Apps {
+			a := &page.Apps[i]
+			if a.Name != name {
+				continue
+			}
+			if a.Kind != AppKindPull || a.Queue == nil || *a.Queue != queue {
+				return nil, &APIError{Status: http.StatusConflict, Code: "app_exists", Message: fmt.Sprintf("the app %q exists but isn't a pull app with the queue %s; pass DevAppOptions.Name another name", name, queue)}
+			}
+			return a, nil
+		}
+		if page.NextCursor == nil || *page.NextCursor == "" {
+			return nil, &APIError{Status: http.StatusNotFound, Code: "not_found", Message: fmt.Sprintf("the dev app %q was neither created nor found", name)}
+		}
+		cursor = *page.NextCursor
+	}
 }
 
 // RunStep is one step of a run.
@@ -514,8 +603,12 @@ func (c *Client) Events(ctx context.Context, runID string, o EventsOptions) (*Ev
 // caller (workflows.callbacks.complete). The first completion wins: a repeat with the same value
 // succeeds, a different one is a 409 callback_completed, and after the timeout it's a 410
 // callback_expired.
-func (c *Client) CompleteCallback(ctx context.Context, runID, stepID string, value any) error {
-	return c.do(ctx, request{method: http.MethodPost, path: "/runs/" + pe(runID) + "/callbacks/" + pe(stepID), body: jsonValue(value)})
+func (c *Client) CompleteCallback(ctx context.Context, runID, stepID string, value any) (*WorkflowRun, error) {
+	var out WorkflowRun
+	if err := c.do(ctx, request{method: http.MethodPost, path: "/runs/" + pe(runID) + "/callbacks/" + pe(stepID), body: jsonValue(value), out: &out}); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 // jsonValue makes a nil value JSON null (do sends no body for nil).
@@ -530,9 +623,7 @@ func jsonValue(v any) any {
 // the only credential, so no API key is sent. Answers as CompleteCallback's: 404 for an unknown
 // token, 409 callback_completed, 410 callback_expired or for an ended run.
 func CompleteCallbackURL(ctx context.Context, httpc *http.Client, callbackURL string, value any) error {
-	if httpc == nil {
-		httpc = &http.Client{Timeout: 70 * time.Second}
-	}
+	httpc = noRedirects(httpc)
 	body, err := jsonx.Marshal(jsonValue(value))
 	if err != nil {
 		return err
@@ -696,6 +787,11 @@ func (c *Client) ResumeSchedule(ctx context.Context, id string) (*Schedule, erro
 func (c *Client) TriggerSchedule(ctx context.Context, id string, idempotencyKey string) (*WorkflowRun, error) {
 	var out WorkflowRun
 	return &out, c.do(ctx, request{method: http.MethodPost, path: "/schedules/" + pe(id) + "/trigger", body: map[string]any{}, key: idempotencyKey, out: &out})
+}
+
+// ScheduleInput decodes the schedule's input into into (when it has one: Schedule.HasInput).
+func (c *Client) ScheduleInput(ctx context.Context, id string, into any) error {
+	return c.do(ctx, request{method: http.MethodGet, path: "/schedules/" + pe(id) + "/payloads/input", out: into})
 }
 
 // DeleteSchedule deletes a schedule; its runs continue.

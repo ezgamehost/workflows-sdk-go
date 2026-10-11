@@ -15,7 +15,7 @@ import (
 func main() {
 	ctx := context.Background()
 	c, err := workflows.NewClient(workflows.ClientOptions{APIKey: os.Getenv("E2E_API_KEY"), OrganizationID: os.Getenv("E2E_ORG"), ProjectID: os.Getenv("E2E_PROJECT"),
-		BaseURL: envOr("E2E_API", "http://127.0.0.1:6100"), Retries: 90, MaxRetryDelay: 2 * time.Second})
+		BaseURL: envOr("E2E_API", "http://127.0.0.1:6100"), Retries: new(90), MaxRetryDelay: 2 * time.Second})
 	if err != nil {
 		log.Fatal(err)
 	}

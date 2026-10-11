@@ -101,14 +101,16 @@ func WithRetry(p RetryPolicy) WorkflowOption {
 	}
 }
 
-// MaxStepTimeout is the longest step timeout: a step can't outlive an invocation.
-const MaxStepTimeout = 15 * time.Minute
+// MaxStepTimeout is the longest step timeout: 24 hours, a pull invocation's longest deadline. A
+// push handler refuses a workflow timeout longer than its MaxInvocationSeconds.
+const MaxStepTimeout = 24 * time.Hour
 
-// WithTimeout sets the default step timeout: 1 ms to 15 minutes.
+// WithTimeout sets the default step timeout: 1 ms to 24 hours. A pull app's invocation deadline
+// is its longest announced workflow timeout (at least 15 minutes).
 func WithTimeout(t time.Duration) WorkflowOption {
 	return func(d *definition) error {
 		if t < time.Millisecond || t > MaxStepTimeout {
-			return fmt.Errorf("a step timeout is 1 ms to 15 minutes, got %v", t)
+			return fmt.Errorf("a step timeout is 1 ms to 24 hours, got %v", t)
 		}
 		d.timeout = t
 		return nil

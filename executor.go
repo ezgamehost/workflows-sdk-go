@@ -71,6 +71,7 @@ type call struct {
 	input     json.RawMessage
 	branches  []func(Context) error
 	race      bool
+	failFast  bool // All: the first error decides
 }
 
 type reply struct {
@@ -104,11 +105,12 @@ type branch struct {
 }
 
 type group struct {
-	parent  *call
-	pending int
-	errs    []error
-	race    bool
-	decided bool
+	parent   *call
+	pending  int
+	errs     []error
+	race     bool
+	failFast bool
+	decided  bool
 }
 
 func (b *branch) Run() RunInfo { return b.x.info }
@@ -442,7 +444,7 @@ func (x *executor) handle(ev event) {
 		}
 		c.epoch = x.epoch
 		if c.kind == kindGroup {
-			g := &group{parent: c, pending: len(c.branches), errs: make([]error, len(c.branches)), race: c.race}
+			g := &group{parent: c, pending: len(c.branches), errs: make([]error, len(c.branches)), race: c.race, failFast: c.failFast}
 			x.groups = append(x.groups, g)
 			if len(c.branches) == 0 {
 				x.resume(c, reply{})
@@ -520,10 +522,14 @@ func (x *executor) applyCompletion() bool {
 	g.errs[b.index] = err
 	g.pending--
 	switch {
-	case g.race && !g.decided:
+	case g.decided:
+	case g.race:
 		g.decided = true
 		x.resume(g.parent, reply{winner: b.index, err: err})
-	case !g.race && g.pending == 0:
+	case g.failFast && err != nil:
+		g.decided = true
+		x.resume(g.parent, reply{winner: b.index, err: err})
+	case g.pending == 0:
 		g.decided = true
 		x.resume(g.parent, reply{err: joinBranchErrors(g.errs)})
 	}
@@ -718,9 +724,22 @@ func (x *executor) loop(ctx context.Context) ([]protocol.Command, error) {
 			x.resume(c, reply{err: cancelledError("the run was cancelled")})
 			continue
 		}
-		if x.cancelThrown && c.kind != kindRun {
-			x.resume(c, reply{err: cancelledError("the run is cancelling: only workflows.Run cleanup steps can run")})
-			continue
+		if x.cancelThrown {
+			// Only Run cleanup steps run while cancelling: the first other call, wherever it is,
+			// is refused at once.
+			if refused := firstOf(pending, func(p *call) bool { return p.kind != kindRun }); refused != nil {
+				x.resume(refused, reply{err: cancelledError("the run is cancelling: only workflows.Run cleanup steps can run")})
+				continue
+			}
+			// A cleanup step doesn't wait behind steps the engine already owns (an in-flight
+			// parallel sibling): the next call is the oldest one the engine doesn't own.
+			c = firstOf(pending, func(p *call) bool {
+				e, ok := x.journal[p.stepID]
+				return !ok || e.Status == protocol.StatusRetrying
+			})
+			if c == nil {
+				return x.end(nil), nil
+			}
 		}
 		// The deciding call: at 1.1 the oldest call with no journal entry (D2-19; calls the
 		// engine owns don't hold values back); at 1.0, and while cancelling, the oldest call.
@@ -785,6 +804,15 @@ func (x *executor) entryAttempt(c *call) int {
 		return e.Attempt + 1
 	}
 	return 1
+}
+
+func firstOf(cs []*call, pred func(*call) bool) *call {
+	for _, c := range cs {
+		if pred(c) {
+			return c
+		}
+	}
+	return nil
 }
 
 // plan is the frontier rule (protocol 1.1, D2-19, identical in every SDK): one actionable run

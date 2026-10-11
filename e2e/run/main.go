@@ -129,7 +129,7 @@ func start(appID, workflow string, input any, o workflows.StartOptions) *workflo
 
 func main() {
 	client = must(workflows.NewClient(workflows.ClientOptions{APIKey: os.Getenv("E2E_API_KEY"), OrganizationID: os.Getenv("E2E_ORG"),
-		ProjectID: os.Getenv("E2E_PROJECT"), BaseURL: envOr("E2E_API", "http://127.0.0.1:6100"), Retries: 90, MaxRetryDelay: 2 * time.Second}))
+		ProjectID: os.Getenv("E2E_PROJECT"), BaseURL: envOr("E2E_API", "http://127.0.0.1:6100"), Retries: new(90), MaxRetryDelay: 2 * time.Second}))
 	push, pull := os.Getenv("E2E_APP_ID"), os.Getenv("E2E_PULL_APP_ID")
 	phase2 := os.Getenv("E2E_PHASE1_ONLY") != "1"
 

@@ -44,11 +44,17 @@ type fakeLive struct {
 	pollStatus     int
 	pollRetryAfter string
 	pollTimes      []time.Time
+
+	completeDelay           time.Duration // a complete takes this long to answer
+	completing              map[string]bool
+	heartbeatsAfterComplete map[string]int // heartbeats while a complete was in flight
+	slowBody                time.Duration  // a poll answer's body arrives this long after its headers
+	onHeaders               func()         // called once a poll answer's headers are sent
 }
 
 func newFakeLive(t *testing.T) *fakeLive {
 	f := &fakeLive{t: t, heartbeats: map[string]int{}, completes: map[string][]protocol.InvocationResult{}, completed: make(chan string, 100),
-		checkpoints: map[string]int{}, pollWait: make(chan struct{})}
+		checkpoints: map[string]int{}, pollWait: make(chan struct{}), completing: map[string]bool{}, heartbeatsAfterComplete: map[string]int{}}
 	f.srv = httptest.NewServer(f)
 	t.Cleanup(func() { f.srv.Close() })
 	return f
@@ -106,11 +112,23 @@ func (f *fakeLive) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(204)
 			return
 		}
+		if f.onHeaders != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(" "))
+			w.(http.Flusher).Flush()
+			time.Sleep(50 * time.Millisecond) // the headers have reached the worker
+			f.onHeaders()
+			time.Sleep(f.slowBody)
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"invocations": batch})
 	case "/v1/invocations/heartbeat":
 		f.mu.Lock()
 		f.heartbeats[token]++
 		n := f.heartbeats[token]
+		if f.completing[token] {
+			f.heartbeatsAfterComplete[token]++
+		}
 		f.mu.Unlock()
 		if f.cancelAfter > 0 && n >= f.cancelAfter {
 			_, _ = w.Write([]byte(`{"cancel":{"requestedAt":"2026-10-10T00:00:00Z","graceUntil":"2026-10-10T00:05:00Z"}}`))
@@ -128,6 +146,10 @@ func (f *fakeLive) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		w.WriteHeader(204)
 	case "/v1/invocations/complete":
+		f.mu.Lock()
+		f.completing[token] = true
+		f.mu.Unlock()
+		time.Sleep(f.completeDelay)
 		var res protocol.InvocationResult
 		if err := json.Unmarshal(body, &res); err != nil {
 			f.t.Errorf("complete: %v", err)

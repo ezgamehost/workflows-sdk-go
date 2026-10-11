@@ -108,6 +108,11 @@ func Handler(o HandlerOptions) (http.Handler, error) {
 	if h.maxSeconds < 1 || h.maxSeconds > 900 {
 		return nil, errors.New("workflows.Handler: MaxInvocationSeconds is 1 to 900")
 	}
+	for _, d := range h.order {
+		if d.timeout > time.Duration(h.maxSeconds)*time.Second {
+			return nil, fmt.Errorf("workflows.Handler: %q's step timeout (%v) is longer than MaxInvocationSeconds (%d s), so its steps couldn't finish; use a pull worker for longer steps", d.name, d.timeout, h.maxSeconds)
+		}
+	}
 	if h.maxSteps < 0 {
 		return nil, errors.New("workflows.Handler: MaxStepsPerInvocation is at least 1")
 	}
@@ -116,8 +121,9 @@ func Handler(o HandlerOptions) (http.Handler, error) {
 	}
 	h.deployment = protocol.CleanDeployment(h.deployment)
 	if h.httpc == nil {
-		h.httpc = &http.Client{}
+		h.httpc = &http.Client{} // each call is bounded by the invocation's deadline
 	}
+	h.httpc = noRedirects(h.httpc)
 	if h.maxSteps == 0 {
 		h.maxSteps = 50
 	}
