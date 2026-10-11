@@ -960,6 +960,9 @@ func (x *executor) runFn(ctx context.Context, c *call, attempt int) (json.RawMes
 	go func() {
 		select {
 		case <-x.o.Cancelled:
+			// The workflow's Done closes first, so code that sees the step cancelled sees it too.
+			x.hbCancel.Store(true)
+			x.cancelFn()
 			cancelCause(ErrCancelled) // context.Cause(sc) is ErrCancelled
 		case <-ctx.Done():
 			cancelCause(context.Cause(ctx))
