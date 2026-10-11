@@ -313,3 +313,26 @@ func TestInvocationVectorsParse(t *testing.T) {
 		t.Fatal("createdSeq 0 accepted")
 	}
 }
+
+// A step that changed between journal page fetches comes back on a later page at its new seq:
+// the replay keeps the highest-seq copy, and a callback keeps its createdSeq.
+func TestJournalPagesKeepTheNewestCopy(t *testing.T) {
+	inv := invocation("sequence", map[string]int{"N": 2}, entry(1, "add", "run", "running", 1, ""))
+	inv.Journal.Complete = false
+	second := entry(3, "add", "run", "completed", 1, "0") // the same step, completed meanwhile
+	next := protocol.JournalEntry{Seq: 4, StepID: protocol.StepID("add", 1), Name: "add", Kind: "run", Status: "completed", Attempt: 1, Output: json.RawMessage("1")}
+	io := &fakeIO{pages: []protocol.Journal{{Complete: true, Entries: []protocol.JournalEntry{second, next}}}}
+	if cmds := run(t, sequenceWF(), inv, io); show(cmds) != `[{"type":"runCompleted","output":1}]` || len(io.checkpoints) != 0 {
+		t.Fatalf("%s %s", show(cmds), show(io.checkpoints))
+	}
+	// The newer copy first (out of order) still wins; createdSeq survives either way.
+	got := dedupeJournal([]protocol.JournalEntry{
+		{Seq: 5, StepID: "cb", Status: "completed"},
+		{Seq: 1, StepID: "cb", Status: "waiting", CreatedSeq: 1},
+		{Seq: 2, StepID: "x", Status: "running"},
+		{Seq: 6, StepID: "x", Status: "completed"},
+	})
+	if show(got) != show([]protocol.JournalEntry{{Seq: 5, StepID: "cb", Status: "completed", CreatedSeq: 1}, {Seq: 6, StepID: "x", Status: "completed"}}) {
+		t.Fatalf("%s", show(got))
+	}
+}

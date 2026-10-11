@@ -322,6 +322,7 @@ func (x *executor) load(ctx context.Context) error {
 		entries = append(entries, page.Entries...)
 		complete = page.Complete || len(page.Entries) == 0
 	}
+	entries = dedupeJournal(entries)
 	var refs []int
 	for i := range entries {
 		if entries[i].OutputRef != "" {
@@ -363,6 +364,30 @@ func (x *executor) load(ctx context.Context) error {
 		x.journal[e.StepID] = e
 	}
 	return nil
+}
+
+// dedupeJournal keeps one entry per step, the highest-seq one: pages are read against the
+// current state, so a step that changed between page fetches comes back on a later page at its
+// new seq. A callback's createdSeq is kept from whichever copy has it.
+func dedupeJournal(entries []protocol.JournalEntry) []protocol.JournalEntry {
+	byStep := make(map[string]int, len(entries))
+	out := make([]protocol.JournalEntry, 0, len(entries))
+	for _, e := range entries {
+		i, seen := byStep[e.StepID]
+		if !seen {
+			byStep[e.StepID] = len(out)
+			out = append(out, e)
+			continue
+		}
+		created := max(out[i].CreatedSeq, e.CreatedSeq)
+		if e.Seq > out[i].Seq {
+			out[i] = e
+		}
+		if out[i].CreatedSeq == 0 {
+			out[i].CreatedSeq = created
+		}
+	}
+	return out
 }
 
 func (x *executor) spawn(path []int, g *group, index int, fn func(Context) error) {
