@@ -3,6 +3,7 @@ package workflows
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -238,3 +239,77 @@ func TestWorkerRunsWhatItReceivedAtShutdown(t *testing.T) {
 type roundTrip func(*http.Request) (*http.Response, error)
 
 func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func branchesWF() Workflow {
+	return New("branches", func(ctx Context, _ none) (map[string]string, error) {
+		var a, b string
+		err := Parallel(ctx,
+			func(c Context) error {
+				cb, err := CreateCallback(c, "approval", time.Minute)
+				if err != nil {
+					return err
+				}
+				if a, err = step(c, "log", "A"); err != nil {
+					return err
+				}
+				_, err = WaitCallback[any](c, cb)
+				return err
+			},
+			func(c Context) (err error) {
+				if _, err = step(c, "prep", "P"); err != nil {
+					return err
+				}
+				b, err = step(c, "log", "B")
+				return
+			},
+		)
+		return map[string]string{"a": a, "b": b}, err
+	})
+}
+
+// A callback's creation replays at createdSeq (its seq moved to its completion), so the
+// branches register their steps in the order they first did.
+func TestCallbackCreationReplaysAtCreatedSeq(t *testing.T) {
+	io := &fakeIO{}
+	cmds := run(t, branchesWF(), invocation("branches", nil), io)
+	if len(io.checkpoints) != 1 || io.checkpoints[0][0].Type != "callbackCreated" || show(types(cmds)) != `["planParallel"]` ||
+		cmds[0].Steps[0].Name != "prep" || cmds[0].Steps[1].StepID != protocol.StepID("log", 0) {
+		t.Fatalf("first turn: %s %s", show(io.checkpoints), show(cmds))
+	}
+	cb := entry(5, "approval", "callback", "completed", 1, `{"ok":true}`)
+	cb.CreatedSeq, cb.Token = 1, io.checkpoints[0][0].Token
+	logB := entry(4, "log", "run", "completed", 1, `"B"`)
+	logB.StepID = protocol.StepID("log", 1)
+	inv := invocation("branches", nil, cb, entry(2, "log", "run", "completed", 1, `"A"`), entry(3, "prep", "run", "completed", 1, `"P"`), logB)
+	if cmds := run(t, branchesWF(), inv, &fakeIO{}); show(cmds) != `[{"type":"runCompleted","output":{"a":"A","b":"B"}}]` {
+		t.Fatalf("replay: %s", show(cmds))
+	}
+	// Without createdSeq (an older engine), the creation settles at seq: the old order.
+	inv.Journal.Entries[0].CreatedSeq = 0
+	if cmds := run(t, branchesWF(), inv, &fakeIO{}); show(cmds) == `[{"type":"runCompleted","output":{"a":"A","b":"B"}}]` {
+		t.Fatalf("without createdSeq the replay can't know the order: %s", show(cmds))
+	}
+}
+
+func TestInvocationVectorsParse(t *testing.T) {
+	var m struct {
+		Invocation struct{ Valid, Invalid []json.RawMessage }
+	}
+	loadVector(t, "messages.json", &m)
+	for _, raw := range m.Invocation.Valid {
+		if _, err := parseInvocation(raw); err != nil {
+			t.Errorf("valid %s: %v", raw, err)
+		}
+	}
+	for _, raw := range m.Invocation.Invalid {
+		if _, err := parseInvocation(raw); err == nil {
+			t.Errorf("invalid %s accepted", raw)
+		}
+	}
+	bad := invocation("x", nil, protocol.JournalEntry{Seq: 1, StepID: "s", Name: "n", Kind: "callback", Status: "waiting", Attempt: 1, Token: "t"})
+	b, _ := json.Marshal(bad)
+	b = []byte(strings.Replace(string(b), `"token":"t"`, `"token":"t","createdSeq":0`, 1))
+	if _, err := parseInvocation(b); err == nil {
+		t.Fatal("createdSeq 0 accepted")
+	}
+}

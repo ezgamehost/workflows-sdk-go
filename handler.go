@@ -275,6 +275,21 @@ func parseInvocation(b []byte) (*protocol.Invocation, error) {
 				return nil, errors.New("a journal entry needs seq, stepId and status")
 			}
 		}
+		// createdSeq, when present, is a seq: at least 1 (0 would decode as absent).
+		var probe struct {
+			Journal struct {
+				Entries []struct {
+					CreatedSeq *int64 `json:"createdSeq"`
+				} `json:"entries"`
+			} `json:"journal"`
+		}
+		if json.Unmarshal(b, &probe) == nil {
+			for _, e := range probe.Journal.Entries {
+				if e.CreatedSeq != nil && *e.CreatedSeq < 1 {
+					return nil, errors.New("a journal entry's createdSeq is at least 1")
+				}
+			}
+		}
 		if inv.Token == "" || inv.Endpoints.Live == "" {
 			return nil, errors.New("missing token or endpoints.live")
 		}

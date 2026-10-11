@@ -592,17 +592,23 @@ func (x *executor) assign(pending []*call) {
 
 var settledStatus = map[string]bool{protocol.StatusCompleted: true, protocol.StatusFailed: true, protocol.StatusCancelled: true}
 
-// recorded: the journal entry that settles c. A callback's creation is recorded once its token
-// is journaled, whatever the callback's status; every other call once its step has an outcome.
-func (x *executor) recorded(c *call) (protocol.JournalEntry, bool) {
+// recorded: the journal entry that settles c, and the seq it settles at. A callback's creation
+// is recorded once its token is journaled, whatever the callback's status, and settles at the
+// seq its creation committed (createdSeq; seq from an engine that doesn't send it); every other
+// call, wait() included, once its step has an outcome, at its seq.
+func (x *executor) recorded(c *call) (protocol.JournalEntry, int64, bool) {
 	e, ok := x.journal[c.stepID]
 	if !ok {
-		return e, false
+		return e, 0, false
 	}
 	if c.kind == kindCallbackCreate {
-		return e, e.Token != ""
+		seq := e.Seq
+		if e.CreatedSeq > 0 {
+			seq = e.CreatedSeq
+		}
+		return e, seq, e.Token != ""
 	}
-	return e, settledStatus[e.Status]
+	return e, e.Seq, settledStatus[e.Status]
 }
 
 func cancelledError(msg string) *Error {
@@ -664,9 +670,10 @@ func (x *executor) loop(ctx context.Context) ([]protocol.Command, error) {
 		}
 		var best *call
 		var bestEntry protocol.JournalEntry
+		var bestSeq int64
 		for _, c := range pending { // in call order: equal seqs go to the older call
-			if e, ok := x.recorded(c); ok && (best == nil || e.Seq < bestEntry.Seq) {
-				best, bestEntry = c, e
+			if e, seq, ok := x.recorded(c); ok && (best == nil || seq < bestSeq) {
+				best, bestEntry, bestSeq = c, e, seq
 			}
 		}
 		if best != nil {

@@ -95,6 +95,9 @@ type JournalEntry struct {
 	OutputRef string          `json:"outputRef,omitempty"`
 	Error     *WireError      `json:"error,omitempty"`
 	Token     string          `json:"token,omitempty"` // kind callback: the callback token (1.1)
+	// CreatedSeq (kind callback) is the seq at which callbackCreated committed; Seq moves to the
+	// completion. A replay settles the creation at CreatedSeq (Seq when absent) and wait() at Seq.
+	CreatedSeq int64 `json:"createdSeq,omitempty"`
 }
 
 // Journal is a run's recorded steps; Complete is false when the SDK must page the rest by seq.
