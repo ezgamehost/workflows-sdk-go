@@ -500,3 +500,24 @@ func TestWorkerNeverHotLoopsOnRetryableAnswers(t *testing.T) {
 		}
 	}
 }
+
+// ctx.Run().Traceparent is the pulled invocation's traceparent field; "" without it.
+func TestWorkerTraceparentFromField(t *testing.T) {
+	f := newFakeLive(t)
+	const tp = "00-0199a3d02b3c7d4e9f506b7c8d9e0f1a-0123456789abcdef-01"
+	with, without := pulledInvocation("traced", nil), pulledInvocation("traced", nil)
+	with.Traceparent = tp
+	f.push(with, without)
+	traced := New("traced", func(ctx Context, _ none) (string, error) { return ctx.Run().Traceparent, nil })
+	startWorker(t, f, WorkerOptions{Workflows: []Workflow{traced}, MaxConcurrent: 2})
+	waitComplete(t, f)
+	waitComplete(t, f)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for tok, want := range map[string]string{with.Token: `"` + tp + `"`, without.Token: `""`} {
+		res := f.completes[tok]
+		if len(res) != 1 || len(res[0].Commands) != 1 || string(res[0].Commands[0].Output) != want {
+			t.Fatalf("%s: %s", tok, show(res))
+		}
+	}
+}

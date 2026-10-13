@@ -205,3 +205,38 @@ func TestSDKNameMatchesTheProtocol(t *testing.T) {
 		t.Fatal(SDKName)
 	}
 }
+
+// ctx.Run().Traceparent is the push request's traceparent header, exactly as received; "" without
+// it. A body field isn't read on push: the engine sends the header.
+func TestHandlerTraceparentFromHeader(t *testing.T) {
+	ok, _ := liveServer(t, func(int) (int, string) { return 204, "" })
+	traced := New("traced", func(ctx Context, _ none) (string, error) { return ctx.Run().Traceparent, nil })
+	h := mustHandler(t, HandlerOptions{Workflows: []Workflow{traced}})
+	const tp = "00-0199a3d02b3c7d4e9f506b7c8d9e0f1a-0123456789abcdef-01"
+	output := func(header, field string) string {
+		inv := invocation("traced", nil)
+		inv.Endpoints.Live = ok.URL
+		inv.Deadline = time.Now().Add(time.Minute)
+		inv.Traceparent = field
+		b, _ := json.Marshal(inv)
+		req := signed(t, testSecret, time.Now(), b)
+		if header != "" {
+			req.Header.Set("traceparent", header)
+		}
+		code, out, body := serve(h, req)
+		cmds, _ := out["commands"].([]any)
+		if code != 200 || len(cmds) != 1 {
+			t.Fatalf("%d %s", code, body)
+		}
+		return cmds[0].(map[string]any)["output"].(string)
+	}
+	if got := output(tp, ""); got != tp {
+		t.Fatalf("with the header: %q", got)
+	}
+	if got := output("", ""); got != "" {
+		t.Fatalf("without it: %q", got)
+	}
+	if got := output("", tp); got != "" {
+		t.Fatalf("a push body's field: %q", got)
+	}
+}

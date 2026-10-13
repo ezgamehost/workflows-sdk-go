@@ -159,6 +159,11 @@ type RunInfo struct {
 	ID, RunKey, Workflow string
 	Attempt              int
 	Schedule             *ScheduleInfo // set for runs a schedule started
+	// Traceparent is the invocation's W3C traceparent, exactly as received (the push request's
+	// traceparent header, or a pulled invocation's traceparent field), while the project's
+	// observability setting is on; "" otherwise. Parent your own spans on it: the SDK has no
+	// OpenTelemetry dependency.
+	Traceparent string
 }
 
 // Context is what a workflow (and each Parallel or Race branch) receives. Its Done channel is

@@ -329,5 +329,8 @@ func all() []workflows.Workflow {
 			}
 			return out, workflows.All(ctx, branches...)
 		}),
+		workflows.New("traced", func(ctx workflows.Context, _ none) (string, error) {
+			return ctx.Run().Traceparent, nil
+		}),
 	}
 }

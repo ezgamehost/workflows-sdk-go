@@ -260,7 +260,7 @@ func execute(ctx context.Context, inv *protocol.Invocation, wf *definition, io l
 	}
 	x.apiBase = strings.TrimRight(x.apiBase, "/")
 	x.started = x.now()
-	x.info = RunInfo{ID: inv.Run.ID, RunKey: inv.Run.RunKey, Workflow: inv.Run.Workflow, Attempt: inv.Run.Attempt}
+	x.info = RunInfo{ID: inv.Run.ID, RunKey: inv.Run.RunKey, Workflow: inv.Run.Workflow, Attempt: inv.Run.Attempt, Traceparent: inv.Traceparent}
 	if s := inv.Run.Schedule; s != nil {
 		x.info.Schedule = &ScheduleInfo{ID: s.ID, ScheduledTime: s.ScheduledTime}
 	}

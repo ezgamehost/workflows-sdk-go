@@ -150,6 +150,9 @@ type Invocation struct {
 	TargetStepID    string    `json:"targetStepId,omitempty"`
 	Deadline        time.Time `json:"deadline"`
 	Cancel          *Cancel   `json:"cancel"`
+	// Traceparent is a pulled invocation's W3C traceparent, sent while the project's
+	// observability setting is on (a push request carries it as the traceparent header).
+	Traceparent string `json:"traceparent,omitempty"`
 }
 
 // PlannedStep is one step of a planParallel command.

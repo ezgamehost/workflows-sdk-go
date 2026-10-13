@@ -189,6 +189,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "invalid_invocation", "message": err.Error()})
 		return
 	}
+	// A push request carries the traceparent as a header (only while the setting is on).
+	inv.Traceparent = r.Header.Get("traceparent")
 	sdk := protocol.SDKInfo{Name: SDKName, Version: SDKVersion}
 	if inv.Kind == protocol.InvocationSync {
 		reply := protocol.SyncReply{ProtocolVersions: protocol.Versions, SDK: sdk, MaxInvocationSeconds: h.maxSeconds, Deployment: h.deployment}

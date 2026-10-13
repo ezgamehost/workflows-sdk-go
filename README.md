@@ -11,8 +11,8 @@ The SDK uses only the Go standard library.
 go get github.com/ezgamehost/workflows-sdk-go
 ```
 
-**Status:** in development. Verified end to end against workflows-stack `830dcb9`: the
-conformance harness (55 scenarios, push and pull) and the end-to-end suite (14 checks, phase 1 and
+**Status:** in development. Verified end to end against workflows-stack `ec53771`: the
+conformance harness (57 scenarios, push and pull) and the end-to-end suite (14 checks, phase 1 and
 phase 2); see [Verification](#verification).
 
 ## Quick start
@@ -210,6 +210,33 @@ run, err := c.TriggerSchedule(ctx, s.ID, "manual-2026-10-10") // the key names t
 - A run a schedule started has `ctx.Run().Schedule` set (`ID` and the cron `ScheduledTime`).
 - `UpdateSchedule(ctx, id, revision, …)` applies only to that revision (`412` otherwise).
   `PauseSchedule`, `ResumeSchedule`, `ListSchedules` and `DeleteSchedule` do what they say.
+
+## Tracing
+
+While the project's Workflows observability setting is on, EZGH sends each invocation a W3C
+`traceparent` (the push request's header, or a pulled invocation's field), and
+`ctx.Run().Traceparent` is that value exactly as received. It's `""` while the setting is off, so a
+parent-based sampler never waits for a parent that won't arrive. The SDK has no OpenTelemetry
+dependency; with `go.opentelemetry.io/otel`, parent your own spans on it. Start them inside step
+functions: code outside steps re-runs on every replay.
+
+```go
+import (
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+)
+
+var tracer = otel.Tracer("billing")
+
+var charge = workflows.New("charge", func(ctx workflows.Context, in Order) (string, error) {
+	return workflows.Run(ctx, "charge-card", func(sc workflows.StepContext) (string, error) {
+		parent := propagation.TraceContext{}.Extract(sc, propagation.MapCarrier{"traceparent": ctx.Run().Traceparent})
+		spanCtx, span := tracer.Start(parent, "charge card")
+		defer span.End()
+		return payments.Charge(spanCtx, in)
+	})
+})
+```
 
 ## Pull workers and dev mode
 
