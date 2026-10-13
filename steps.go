@@ -321,6 +321,68 @@ func Invoke[T any](ctx Context, name, workflow string, input any, opts ...StepOp
 	return decodeInto[T](r.out)
 }
 
+// MaxMessageWait is the longest WaitForMessage timeout: 30 days.
+const MaxMessageWait = 30 * 24 * time.Hour
+
+// WaitForMessageOptions: QueueID is the queue's ID (a lowercase UUID, not its que_ slug); Key is
+// the correlation attribute's value to wait for (^[A-Za-z0-9_.:-]{1,256}$); Timeout is 1 second
+// to 30 days.
+type WaitForMessageOptions struct {
+	QueueID string
+	Key     string
+	Timeout time.Duration
+}
+
+// ReceivedMessage is the queue message a wait received. GroupID and Seq are FIFO queues' only.
+type ReceivedMessage struct {
+	MessageID  string            `json:"messageId"`
+	Body       string            `json:"body"`
+	Attributes map[string]string `json:"attributes"`
+	SentAt     time.Time         `json:"sentAt"`
+	QueueID    string            `json:"queueId"`
+	GroupID    string            `json:"groupId,omitempty"`
+	Seq        string            `json:"seq,omitempty"`
+}
+
+// WaitForMessage suspends the workflow until a message for o.Key arrives on the queue (protocol
+// 1.2): the queue's workflow subscription in resume mode delivers each message whose correlation
+// attribute equals the key to every run waiting on (queue, key). It returns the message and true,
+// or ok false (and no error) once the timeout passes without one. It takes only WithID.
+func WaitForMessage(ctx Context, name string, o WaitForMessageOptions, opts ...StepOption) (ReceivedMessage, bool, error) {
+	b, err := branchOf(ctx)
+	if err != nil {
+		return ReceivedMessage{}, false, err
+	}
+	if err := checkName(name); err != nil {
+		return ReceivedMessage{}, false, err
+	}
+	if !protocol.ValidQueueID(o.QueueID) {
+		return ReceivedMessage{}, false, argumentError("WaitForMessage needs the queue's ID (a lowercase UUID, not its que_ slug), got %q", o.QueueID)
+	}
+	if !protocol.ValidMessageKey(o.Key) {
+		return ReceivedMessage{}, false, argumentError("WaitForMessage's key matches ^[A-Za-z0-9_.:-]{1,256}$, got %q", o.Key)
+	}
+	if o.Timeout < time.Second || o.Timeout > MaxMessageWait {
+		return ReceivedMessage{}, false, argumentError("a message wait's timeout is 1 second to 30 days, got %v", o.Timeout)
+	}
+	so, err := idOnly(opts, "WaitForMessage")
+	if err != nil {
+		return ReceivedMessage{}, false, err
+	}
+	r := b.call(&call{kind: kindMessage, name: name, explicit: so.id, queueID: o.QueueID, key: o.Key, timeoutMs: o.Timeout.Milliseconds()})
+	if r.err != nil {
+		return ReceivedMessage{}, false, r.err
+	}
+	if len(r.out) == 0 || string(r.out) == "null" {
+		return ReceivedMessage{}, false, nil
+	}
+	var m ReceivedMessage
+	if err := json.Unmarshal(r.out, &m); err != nil {
+		return ReceivedMessage{}, false, NonRetriable(err)
+	}
+	return m, true, nil
+}
+
 // Parallel runs each branch concurrently and returns once every branch has returned: nil, the
 // one error, or the errors joined in branch order. Steps the branches reach together are planned
 // together and run as separate step invocations. Each branch must call steps with the Context

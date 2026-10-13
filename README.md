@@ -11,8 +11,8 @@ The SDK uses only the Go standard library.
 go get github.com/ezgamehost/workflows-sdk-go
 ```
 
-**Status:** in development. Verified end to end against workflows-stack `ec53771`: the
-conformance harness (57 scenarios, push and pull) and the end-to-end suite (14 checks, phase 1 and
+**Status:** in development. Verified end to end against workflows-stack `0d280ce`: the
+conformance harness (61 scenarios, protocol 1.2's message waits included, push and pull) and the end-to-end suite (14 checks, phase 1 and
 phase 2); see [Verification](#verification).
 
 ## Quick start
@@ -233,6 +233,35 @@ sent, err := workflows.SendToQueue(ctx, "notify", queues, "que_…", []workflows
 
 `queues.Send(ctx, queueID, msgs, workflows.SendOptions{IdempotencyKey: …})` works outside
 workflows too (without a key, each call gets a random one, kept across its resends).
+
+## Waiting for a message
+
+`WaitForMessage` suspends the workflow until a message for a key arrives on an EZGH queue, and
+returns it with `ok` true; once the timeout (1 second to 30 days) passes without one, `ok` is false
+and the error nil. A timeout isn't an error.
+
+```go
+paid, ok, err := workflows.WaitForMessage(ctx, "paid", workflows.WaitForMessageOptions{
+	QueueID: queueID, Key: "order:" + in.OrderID, Timeout: 24 * time.Hour,
+})
+if err != nil {
+	return err
+}
+if !ok {
+	return cancelOrder(ctx, in.OrderID) // nobody paid in time
+}
+```
+
+- **Delivery.** The queue needs a subscription that targets the app's workflow in `resume` mode
+  with a `correlationAttribute` (say `orderId`). Each message whose attribute equals a wait's `Key`
+  resumes every run waiting on that queue and key at that moment. A message nobody waits for is
+  retried with the subscription's backoff, then dead-lettered.
+- **The message** is a `ReceivedMessage{MessageID, Body, Attributes, SentAt, QueueID, GroupID,
+  Seq}` (the last two FIFO only). It's recorded, so replays return the same one.
+- `QueueID` is the queue's ID (a lowercase UUID, not its `que_` slug); `Key` matches
+  `^[A-Za-z0-9_.:-]{1,256}$`. It takes `WithID`. Cancelling the run returns an error matching
+  `ErrCancelled` from a pending wait.
+- Waits need a workflows-stack serving protocol 1.2; at 1.0 or 1.1 the run fails non-retriably.
 
 ## Schedules
 

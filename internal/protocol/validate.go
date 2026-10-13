@@ -44,6 +44,7 @@ var commandTypes = map[string]bool{
 	CommandStepStarted: true, CommandStepCompleted: true, CommandStepFailed: true, CommandValueRecorded: true,
 	CommandSleep: true, CommandRunCompleted: true, CommandRunFailed: true, CommandWorkflowNotFound: true,
 	CommandCallbackCreated: true, CommandWaitForCallback: true, CommandInvoke: true, CommandPlanParallel: true,
+	CommandMessageWaitCreated: true, CommandWaitForMessage: true,
 }
 
 // Validate checks the command: its type, each present field's limits, and the fields its type
@@ -112,6 +113,9 @@ func (c Command) Validate() error {
 	if len(c.Steps) > 0 && c.Type != CommandPlanParallel {
 		return invalid("steps on %s", c.Type)
 	}
+	if (c.QueueID != "" || c.Key != "") && c.Type != CommandMessageWaitCreated {
+		return invalid("queueId or key on %s", c.Type)
+	}
 	step := func() error {
 		if c.StepID == "" || c.Name == "" {
 			return invalid("%s needs stepId and name", c.Type)
@@ -153,9 +157,22 @@ func (c Command) Validate() error {
 		if c.Token == "" || c.TimeoutMs < 1 {
 			return invalid("callbackCreated needs token and timeoutMs ≥ 1")
 		}
-	case CommandWaitForCallback:
+	case CommandWaitForCallback, CommandWaitForMessage:
 		if c.StepID == "" {
-			return invalid("waitForCallback needs stepId")
+			return invalid("%s needs stepId", c.Type)
+		}
+	case CommandMessageWaitCreated:
+		if err := step(); err != nil {
+			return err
+		}
+		if !ValidQueueID(c.QueueID) {
+			return invalid("messageWaitCreated needs queueId (a UUID), got %q", c.QueueID)
+		}
+		if !ValidMessageKey(c.Key) {
+			return invalid("messageWaitCreated needs key (^[A-Za-z0-9_.:-]{1,256}$), got %q", c.Key)
+		}
+		if c.TimeoutMs < MinMessageTimeoutMs || c.TimeoutMs > MaxMessageTimeoutMs {
+			return invalid("messageWaitCreated needs timeoutMs from 1,000 to 2,592,000,000, got %d", c.TimeoutMs)
 		}
 	case CommandInvoke:
 		if err := step(); err != nil {

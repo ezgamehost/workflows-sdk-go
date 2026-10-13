@@ -10,6 +10,7 @@ import (
 	"math"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -45,7 +46,8 @@ const (
 	kindCallbackCreate
 	kindCallbackWait
 	kindInvoke
-	kindGroup // Parallel or Race: answered by the executor at once, never journaled
+	kindMessage // a wait for a queue message (1.2)
+	kindGroup   // Parallel or Race: answered by the executor at once, never journaled
 )
 
 type call struct {
@@ -69,6 +71,8 @@ type call struct {
 	timeoutMs int64
 	workflow  string
 	input     json.RawMessage
+	queueID   string // kindMessage
+	key       string // kindMessage
 	branches  []func(Context) error
 	race      bool
 	failFast  bool // All: the first error decides
@@ -226,6 +230,13 @@ func supportsParallel(version string) bool {
 		}
 	}
 	return n >= 1
+}
+
+// supportsMessages: protocol 1.2 and later wait for queue messages.
+func supportsMessages(version string) bool {
+	major, minor, _ := strings.Cut(version, ".")
+	n, err := strconv.Atoi(minor)
+	return major == "1" && err == nil && n >= 2
 }
 
 // execute runs one orchestrate or step invocation of wf and returns its InvocationResult's
@@ -602,6 +613,9 @@ func (x *executor) assign(pending []*call) {
 			}
 			x.setFatal(NonRetriable(fmt.Errorf("workflows.%s needs protocol 1.1; this invocation is %s", what, x.inv.ProtocolVersion)))
 		}
+		if c.kind == kindMessage && !supportsMessages(x.inv.ProtocolVersion) {
+			x.setFatal(NonRetriable(fmt.Errorf("workflows.WaitForMessage needs protocol 1.2; this invocation is %s", x.inv.ProtocolVersion)))
+		}
 		if c.explicit != "" {
 			if x.explicit[c.explicit] {
 				x.setFatal(newError("workflows.duplicate_step_name", "DuplicateStepName", "the step id %q is used twice; give each step its own id", c.explicit))
@@ -652,6 +666,8 @@ func (x *executor) settleRecorded(c *call, e protocol.JournalEntry) {
 		x.resume(c, reply{out: x.callbackHandle(e.Token)})
 	case e.Status == protocol.StatusCompleted && c.kind == kindSleep:
 		x.resume(c, reply{})
+	case e.Status == protocol.StatusCompleted && c.kind == kindMessage && e.TimedOut:
+		x.resume(c, reply{out: json.RawMessage("null")}) // no message: WaitForMessage's ok is false
 	case e.Status == protocol.StatusCompleted:
 		out := e.Output
 		if len(out) == 0 {
@@ -769,6 +785,11 @@ func (x *executor) loop(ctx context.Context) ([]protocol.Command, error) {
 						return nil, err
 					}
 					continue
+				case kindMessage:
+					if err := x.createMessageWait(ctx, head); err != nil {
+						return nil, err
+					}
+					continue
 				}
 			}
 		}
@@ -857,6 +878,13 @@ func (x *executor) plan(pending []*call) (*call, int, []protocol.Command) {
 				suspends = append(suspends, protocol.Command{Type: protocol.CommandWaitForCallback, StepID: p.stepID})
 			}
 			// value and callback creation are handled when they're the oldest new call.
+		case kindMessage:
+			// A created wait suspends, every time; a new one is created first (as the oldest new
+			// call), like a callback.
+			if ok && !waited[p.stepID] {
+				waited[p.stepID] = true
+				suspends = append(suspends, protocol.Command{Type: protocol.CommandWaitForMessage, StepID: p.stepID})
+			}
 		}
 	}
 	if busy == 0 && len(suspends) == 0 && len(runs)+len(retrying) == 1 {
@@ -1069,6 +1097,17 @@ func (x *executor) createCallback(ctx context.Context, c *call) error {
 	// A wait later in this invocation finds the callback waiting.
 	x.journal[c.stepID] = protocol.JournalEntry{Seq: math.MaxInt64, StepID: c.stepID, Name: c.name, Kind: protocol.KindCallback, Status: protocol.StatusWaiting, Attempt: 1, Token: token}
 	x.resume(c, reply{out: x.callbackHandle(token)})
+	return nil
+}
+
+// createMessageWait records the wait (1.2) in an acknowledged checkpoint. The call stays parked:
+// the invocation ends with waitForMessage (plan), as WaitCallback ends it with waitForCallback.
+func (x *executor) createMessageWait(ctx context.Context, c *call) error {
+	cmd := protocol.Command{Type: protocol.CommandMessageWaitCreated, StepID: c.stepID, Name: c.name, QueueID: c.queueID, Key: c.key, TimeoutMs: c.timeoutMs}
+	if err := x.checkpoint(ctx, append(x.takeOutbox(), cmd)); err != nil {
+		return err
+	}
+	x.journal[c.stepID] = protocol.JournalEntry{Seq: math.MaxInt64, StepID: c.stepID, Name: c.name, Kind: protocol.KindMessage, Status: protocol.StatusWaiting, Attempt: 1, QueueID: c.queueID, Key: c.key}
 	return nil
 }
 

@@ -58,7 +58,7 @@ func TestSignatureVectors(t *testing.T) {
 			t.Errorf("verify[%d]: %s, want %s", i, got, c.Result)
 		}
 	}
-	if v := Versions(); len(v) != 2 || v[0] != "1.0" || v[1] != "1.1" || Version != "1.1" {
+	if v := Versions(); len(v) != 3 || v[0] != "1.0" || v[1] != "1.1" || v[2] != "1.2" || Version != "1.2" {
 		t.Fatalf("versions %v %s", v, Version)
 	}
 }

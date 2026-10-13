@@ -23,7 +23,14 @@ var (
 	queueRe        = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 	workerIDRe     = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
 	errorCodeRe    = regexp.MustCompile(`^(user|workflows\.[a-z_]+)$`)
+	messageKeyRe   = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,256}$`)
 )
+
+// ValidQueueID: a message wait's queue is the queue's ID, a lowercase UUID (1.2).
+func ValidQueueID(s string) bool { return uuidRe.MatchString(s) }
+
+// ValidMessageKey: a message wait's key matches ^[A-Za-z0-9_.:-]{1,256}$ (1.2).
+func ValidMessageKey(s string) bool { return messageKeyRe.MatchString(s) }
 
 // ValidStepIDOverride: an explicit step ID matches ^[A-Za-z0-9._:-]{1,128}$.
 func ValidStepIDOverride(s string) bool { return stepIDRe.MatchString(s) }

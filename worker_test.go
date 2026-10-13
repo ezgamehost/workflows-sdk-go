@@ -257,7 +257,7 @@ func TestWorkerPollBody(t *testing.T) {
 	}
 	for _, raw := range f.rawPolls[:2] {
 		if len(raw) != 7 || string(raw["app"]) != `"`+testApp+`"` || string(raw["queue"]) != `"conformance"` || string(raw["maxTasks"]) != "3" ||
-			string(raw["workerId"]) != `"w-1"` || string(raw["protocolVersions"]) != `["1.0","1.1"]` ||
+			string(raw["workerId"]) != `"w-1"` || string(raw["protocolVersions"]) != `["1.0","1.1","1.2"]` ||
 			string(raw["workflows"]) != `[{"name":"tuned","retry":{"maxAttempts":2,"initialMs":1000,"maxMs":600000,"multiplier":2}}]` {
 			t.Fatalf("poll %v", raw)
 		}

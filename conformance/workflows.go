@@ -332,5 +332,15 @@ func all() []workflows.Workflow {
 		workflows.New("traced", func(ctx workflows.Context, _ none) (string, error) {
 			return ctx.Run().Traceparent, nil
 		}),
+		workflows.New("waitmessage", func(ctx workflows.Context, in struct{ QueueID, Key string }) (map[string]any, error) {
+			m, ok, err := workflows.WaitForMessage(ctx, "paid", workflows.WaitForMessageOptions{QueueID: in.QueueID, Key: in.Key, Timeout: time.Hour})
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				return map[string]any{"received": false}, nil
+			}
+			return map[string]any{"received": true, "body": m.Body, "messageId": m.MessageID}, nil
+		}),
 	}
 }

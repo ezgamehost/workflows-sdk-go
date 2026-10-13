@@ -121,7 +121,7 @@ func TestSyncReply(t *testing.T) {
 	}
 	h = mustHandler(t, HandlerOptions{SigningSecrets: []string{testSecret, otherSecret}, MaxInvocationSeconds: 120})
 	code, _, body := serve(h, signed(t, otherSecret, time.Now(), syncBody()))
-	want := `{"protocolVersions":["1.0","1.1"],"sdk":{"name":"github.com/ezgamehost/workflows-sdk-go","version":"` + SDKVersion + `"},"maxInvocationSeconds":120,"workflows":[{"name":"sequence"},{"name":"tuned","retry":{"maxAttempts":2,"initialMs":1000,"maxMs":600000,"multiplier":2}}],"deployment":"dpl_test"}`
+	want := `{"protocolVersions":["1.0","1.1","1.2"],"sdk":{"name":"github.com/ezgamehost/workflows-sdk-go","version":"` + SDKVersion + `"},"maxInvocationSeconds":120,"workflows":[{"name":"sequence"},{"name":"tuned","retry":{"maxAttempts":2,"initialMs":1000,"maxMs":600000,"multiplier":2}}],"deployment":"dpl_test"}`
 	if code != 200 || body != want {
 		t.Fatalf("%d\n got %s\nwant %s", code, body, want)
 	}

@@ -282,6 +282,9 @@ func parseInvocation(b []byte) (*protocol.Invocation, error) {
 			if e.StepID == "" || e.Status == "" {
 				return nil, errors.New("a journal entry needs seq, stepId and status")
 			}
+			if e.Kind == protocol.KindMessage && (e.QueueID == "" || e.Key == "") {
+				return nil, errors.New("a message entry needs queueId and key")
+			}
 		}
 		// createdSeq, when present, is a seq: at least 1 (0 would decode as absent).
 		var probe struct {

@@ -1,4 +1,4 @@
-// Package protocol is the EZGH Workflows wire protocol (version 1.1): the messages EZGH and an
+// Package protocol is the EZGH Workflows wire protocol (version 1.2): the messages EZGH and an
 // app exchange, signatures, step IDs and tokens. It mirrors workflows-stack's internal/protocol
 // and is checked against the same vectors (testdata/vectors). Customers may use it to verify
 // signatures themselves.
@@ -10,11 +10,11 @@ import (
 )
 
 // Version is the newest protocol version this SDK speaks.
-const Version = "1.1"
+const Version = "1.2"
 
 // Versions are the protocol versions this SDK declares in sync replies and polls; the service
-// speaks the newest it shares. Every SDK declares ["1.0", "1.1"].
-var Versions = []string{"1.0", "1.1"}
+// speaks the newest it shares. Every SDK declares ["1.0", "1.1", "1.2"].
+var Versions = []string{"1.0", "1.1", "1.2"}
 
 // SDKName names this SDK in sync replies, invocation results and polls.
 const SDKName = "github.com/ezgamehost/workflows-sdk-go"
@@ -26,6 +26,7 @@ const (
 	KindValue    = "value"
 	KindCallback = "callback"
 	KindInvoke   = "invoke"
+	KindMessage  = "message" // a wait for a queue message (1.2)
 )
 
 // Journal entry statuses.
@@ -60,6 +61,15 @@ const (
 	CommandWaitForCallback  = "waitForCallback"
 	CommandInvoke           = "invoke"
 	CommandPlanParallel     = "planParallel"
+	// Message waits (1.2).
+	CommandMessageWaitCreated = "messageWaitCreated"
+	CommandWaitForMessage     = "waitForMessage"
+)
+
+// Message waits (1.2): the timeout is 1 second to 30 days.
+const (
+	MinMessageTimeoutMs = 1000
+	MaxMessageTimeoutMs = 2_592_000_000
 )
 
 // RetryPolicy is a step's retry policy (see Backoff).
@@ -98,6 +108,11 @@ type JournalEntry struct {
 	// CreatedSeq (kind callback) is the seq at which callbackCreated committed; Seq moves to the
 	// completion. A replay settles the creation at CreatedSeq (Seq when absent) and wait() at Seq.
 	CreatedSeq int64 `json:"createdSeq,omitempty"`
+	// QueueID and Key (kind message, 1.2): the queue and key waited on. TimedOut: the wait's
+	// timeout passed before a message came (status completed, no output).
+	QueueID  string `json:"queueId,omitempty"`
+	Key      string `json:"key,omitempty"`
+	TimedOut bool   `json:"timedOut,omitempty"`
 }
 
 // Journal is a run's recorded steps; Complete is false when the SDK must page the rest by seq.
@@ -184,6 +199,8 @@ type Command struct {
 	Input        json.RawMessage `json:"input,omitempty"`    // invoke
 	InputRef     string          `json:"inputRef,omitempty"` // invoke
 	Steps        []PlannedStep   `json:"steps,omitempty"`    // planParallel
+	QueueID      string          `json:"queueId,omitempty"`  // messageWaitCreated (1.2)
+	Key          string          `json:"key,omitempty"`      // messageWaitCreated (1.2)
 }
 
 // Checkpoint is a batch of commands sent during an invocation; Seq counts from 1 per invocation.

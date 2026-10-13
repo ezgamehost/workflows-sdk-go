@@ -137,7 +137,7 @@ func main() {
 	check(synced.SyncStatus == "synced" && len(synced.Workflows) == 12 && synced.Deployment != nil && *synced.Deployment == "e2e" &&
 		synced.SDK != nil && synced.SDK.Name == workflows.SDKName, "sync records the app's workflows", synced)
 	if phase2 {
-		check(synced.ProtocolVersion != nil && *synced.ProtocolVersion == "1.1", "sync negotiates protocol 1.1", synced)
+		check(synced.ProtocolVersion != nil && *synced.ProtocolVersion == "1.2", "sync negotiates protocol 1.2", synced)
 	}
 	fmt.Println("ok   sync")
 
