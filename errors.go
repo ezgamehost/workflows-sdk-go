@@ -123,6 +123,8 @@ func codeAndName(err error) (string, string, json.RawMessage) {
 		return code, name, data
 	case *sentinel:
 		return e.code, e.name, nil
+	case *QueuesAPIError:
+		return "user", "QueuesAPIError", e.wireData()
 	}
 	return "user", typeName(err), nil
 }

@@ -196,6 +196,44 @@ report, err := workflows.Invoke[Report](ctx, "provision", "provision-account", P
 The child runs in the same app, at most 10 levels deep, and counts as one of the parent's
 steps. Its failure is an error matching `ErrChildFailed`, whose cause is the child's own error.
 
+## Sending to a queue
+
+`SendToQueue` sends 1–10 messages to an [EZGH Queues](https://ezghcloud.com) queue as a step,
+and returns the recorded result (one `SentMessage{MessageID, Seq, Duplicate}` per message, in
+order). It's `Run` around `QueuesClient.Send`, so a replay returns the result without sending
+again. The client carries your own API key (it needs `queues.messages.send` on the queue): push
+apps hold no API key, so the step never borrows a credential.
+
+```go
+queues, err := workflows.NewQueuesClient(workflows.QueuesClientOptions{
+	APIKey: apiKey, OrganizationID: orgID, ProjectID: projectID, // BaseURL: https://queues-api.ezghcloud.com
+})
+
+// in a workflow:
+sent, err := workflows.SendToQueue(ctx, "notify", queues, "que_…", []workflows.QueueMessage{
+	{Body: string(order), Attributes: map[string]string{"orderId": id}, GroupID: accountID},
+})
+```
+
+- **Sent once.** Every attempt of the step sends the `Idempotency-Key`
+  `wfq_<hex(SHA-256(runID + ":" + stepID))>` (`SendToQueueDigest`), which the Queues API honors
+  for 48 hours: an attempt that resends after a crash (between the send and the step's record)
+  gets the first answer instead of a second copy, on standard and FIFO queues alike. So keep the
+  messages deterministic: the same key with a different body is a `409 idempotency_conflict`.
+- **FIFO dedup IDs.** A message with a `GroupID` (a FIFO queue's message) and no `DedupID` of its
+  own is sent with `DedupID` `<that hex>:<index>`; FIFO queues also drop a repeat within their
+  5-minute window. Messages without a `GroupID` are sent as they are, since standard queues
+  refuse `DedupID`.
+- **Errors.** The client resends a 429 (but not `quota_exceeded`), any 5xx, a 409
+  `idempotency_in_progress` and network errors after `Retry-After` (`Retries`, default 3, at most
+  `MaxRetryDelay`, default 10 s, apart), then returns a `*QueuesAPIError` with the HTTP `Status`,
+  the platform `Code` and `RetryAfter`. In the step, what's still failing is retried by the step's
+  retry policy, but another 4xx (a bad message, a missing queue, a refused permission) fails the
+  step at once (non-retriable; recorded with the name `QueuesAPIError` and data `{status, code}`).
+
+`queues.Send(ctx, queueID, msgs, workflows.SendOptions{IdempotencyKey: …})` works outside
+workflows too (without a key, each call gets a random one, kept across its resends).
+
 ## Schedules
 
 ```go
