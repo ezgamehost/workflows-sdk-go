@@ -11,9 +11,9 @@ The SDK uses only the Go standard library.
 go get github.com/ezgamehost/workflows-sdk-go
 ```
 
-**Status:** in development. Verified end to end against workflows-stack `0d280ce`: the
-conformance harness (61 scenarios, protocol 1.2's message waits included, push and pull) and the end-to-end suite (14 checks, phase 1 and
-phase 2); see [Verification](#verification).
+**Status:** in development. Verified end to end against workflows-stack `f717543`: the
+conformance harness (61 scenarios, protocol 1.2's message waits included, push and pull) and the
+end-to-end suite (14 checks, phase 1 and phase 2); see [Verification](#verification).
 
 ## Quick start
 

@@ -5,5 +5,5 @@ package workflows
 // SDKName and SDKVersion go in every sync reply, invocation result and poll.
 const (
 	SDKName    = "github.com/ezgamehost/workflows-sdk-go"
-	SDKVersion = "0.2.0"
+	SDKVersion = "0.3.0"
 )
