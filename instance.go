@@ -81,6 +81,7 @@ type instanceProvider struct {
 	apiKey    string
 	expiresAt time.Time
 	nextTry   time.Time
+	retry     time.Duration // the metadata service's Retry-After (503, 429) on the last answer
 }
 
 func (p *instanceProvider) key(ctx context.Context) (string, error) {
@@ -95,7 +96,7 @@ func (p *instanceProvider) key(ctx context.Context) (string, error) {
 		if err = p.fetch(ctx); err == nil {
 			return p.apiKey, nil
 		}
-		p.nextTry = now.Add(metadataRetryAfter)
+		p.nextTry = now.Add(max(metadataRetryAfter, p.retry))
 		if errors.Is(err, ErrNoBot) {
 			p.apiKey = ""
 		}
@@ -142,7 +143,7 @@ func (p *instanceProvider) fetch(ctx context.Context) error {
 			return nil
 		case status == http.StatusUnauthorized && attempt == 0:
 			p.token = "" // the token is gone (migration, metadata restart): get one new one
-		case status == http.StatusNotFound:
+		case status == http.StatusNotFound && errorCode(body) == "no_bot":
 			return ErrNoBot
 		default:
 			return fmt.Errorf("instance metadata answered %d", status)
@@ -180,6 +181,21 @@ func (p *instanceProvider) do(ctx context.Context, method, path string, h http.H
 		return 0, nil, fmt.Errorf("instance metadata unreachable: %w", err)
 	}
 	defer res.Body.Close()
+	p.retry = 0
+	if n, err := strconv.Atoi(res.Header.Get("Retry-After")); err == nil && n > 0 {
+		p.retry = time.Duration(n) * time.Second
+	}
 	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<16))
 	return res.StatusCode, b, nil
+}
+
+// errorCode is the platform error code in a JSON error body, or "".
+func errorCode(body []byte) string {
+	var e struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	_ = json.Unmarshal(body, &e)
+	return e.Error.Code
 }

@@ -29,6 +29,8 @@ type instanceFake struct {
 	keys        []string // handed out in order, the last repeated
 	ttl         time.Duration
 	status      int // credentials answer when not 0
+	retryAfter  string
+	notFound    bool
 	apiRefuses  map[string]bool
 	apiAuth     []string
 	metadataHit int
@@ -61,8 +63,17 @@ func newInstanceFake(t *testing.T, onInstance bool) (*instanceFake, *http.Client
 			case r.Header.Get("EZGH-Metadata-Token") != f.token:
 				w.WriteHeader(401)
 				_, _ = w.Write([]byte(`{"error":{"code":"invalid_token"}}`))
+			case f.notFound:
+				w.WriteHeader(404)
+				_, _ = w.Write([]byte(`{"error":{"code":"not_found"}}`))
 			case f.status != 0:
+				if f.retryAfter != "" {
+					w.Header().Set("Retry-After", f.retryAfter)
+				}
 				w.WriteHeader(f.status)
+				if f.status == 404 {
+					_, _ = w.Write([]byte(`{"error":{"code":"no_bot"}}`))
+				}
 			default:
 				k := f.keys[0]
 				if len(f.keys) > 1 {
@@ -151,6 +162,7 @@ func TestInstanceProviderRefreshWindow(t *testing.T) {
 		t.Error("served an expired key")
 	}
 	f.status = 404
+	f.notFound = false
 	now = now.Add(time.Minute)
 	if _, err := get(); !errors.Is(err, ErrNoBot) {
 		t.Errorf("%v", err)
@@ -178,5 +190,46 @@ func TestNoAPIKeyOffInstance(t *testing.T) {
 	}
 	if f.metadataHit != 0 {
 		t.Error("probed the network off an instance")
+	}
+}
+
+func TestInstanceProviderRateLimited(t *testing.T) {
+	f, hc := newInstanceFake(t, true)
+	now := time.Now()
+	start := now
+	f.now = func() time.Time { return now }
+	p := &instanceProvider{endpoint: "http://m", httpc: hc, now: func() time.Time { return now }}
+	ctx := context.Background()
+	if k, _ := p.key(ctx); k != instKey1 {
+		t.Fatal(k)
+	}
+	f.status, f.retryAfter = 429, "120"
+	now = start.Add(6 * time.Minute)
+	if k, err := p.key(ctx); err != nil || k != instKey1 {
+		t.Fatalf("%q %v", k, err)
+	}
+	gets := f.gets
+	now = start.Add(7 * time.Minute)
+	if k, _ := p.key(ctx); k != instKey1 || f.gets != gets {
+		t.Errorf("asked again inside Retry-After: %d", f.gets-gets)
+	}
+}
+
+func TestInstanceProviderNotFoundIsTransient(t *testing.T) {
+	f, hc := newInstanceFake(t, true)
+	now := time.Now()
+	start := now
+	f.now = func() time.Time { return now }
+	p := &instanceProvider{endpoint: "http://m", httpc: hc, now: func() time.Time { return now }}
+	ctx := context.Background()
+	_, _ = p.key(ctx)
+	f.notFound = true
+	now = start.Add(6 * time.Minute)
+	if k, err := p.key(ctx); err != nil || k != instKey1 {
+		t.Fatalf("%q %v", k, err)
+	}
+	now = start.Add(11 * time.Minute)
+	if _, err := p.key(ctx); err == nil || errors.Is(err, ErrNoBot) {
+		t.Errorf("%v", err)
 	}
 }
