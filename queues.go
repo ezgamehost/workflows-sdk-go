@@ -61,7 +61,7 @@ func (c QueuesClient) MarshalJSON() ([]byte, error) {
 
 // NewQueuesClient checks the options and returns a client.
 func NewQueuesClient(o QueuesClientOptions) (*QueuesClient, error) {
-	cred, ok := newCredential(o.APIKey, o.HTTPClient)
+	cred, ok := newCredential(o.APIKey)
 	if !ok || o.OrganizationID == "" || o.ProjectID == "" {
 		return nil, errors.New("workflows.NewQueuesClient needs APIKey, OrganizationID and ProjectID")
 	}

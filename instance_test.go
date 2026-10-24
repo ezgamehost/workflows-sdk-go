@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
@@ -31,18 +30,11 @@ type instanceFake struct {
 	status      int // credentials answer when not 0
 	retryAfter  string
 	notFound    bool
+	noExpiry    bool
 	apiRefuses  map[string]bool
 	apiAuth     []string
 	metadataHit int
 	now         func() time.Time
-}
-
-type rewrite struct{ to *url.URL }
-
-func (r rewrite) RoundTrip(req *http.Request) (*http.Response, error) {
-	req = req.Clone(req.Context())
-	req.URL.Scheme, req.URL.Host = r.to.Scheme, r.to.Host
-	return http.DefaultTransport.RoundTrip(req)
 }
 
 func newInstanceFake(t *testing.T, onInstance bool) (*instanceFake, *http.Client) {
@@ -63,6 +55,8 @@ func newInstanceFake(t *testing.T, onInstance bool) (*instanceFake, *http.Client
 			case r.Header.Get("EZGH-Metadata-Token") != f.token:
 				w.WriteHeader(401)
 				_, _ = w.Write([]byte(`{"error":{"code":"invalid_token"}}`))
+			case f.noExpiry:
+				_, _ = fmt.Fprintf(w, `{"apiKey":%q,"bot":"bot_abc"}`, instKey1)
 			case f.notFound:
 				w.WriteHeader(404)
 				_, _ = w.Write([]byte(`{"error":{"code":"not_found"}}`))
@@ -93,20 +87,22 @@ func newInstanceFake(t *testing.T, onInstance bool) (*instanceFake, *http.Client
 		}
 	}))
 	t.Cleanup(f.srv.Close)
-	u, _ := url.Parse(f.srv.URL)
+	oldEndpoint := metadataEndpoint
+	metadataEndpoint = f.srv.URL
+	t.Cleanup(func() { metadataEndpoint = oldEndpoint })
 	old := productNamePath
 	productNamePath = filepath.Join(t.TempDir(), "product_name")
 	if onInstance {
 		_ = os.WriteFile(productNamePath, []byte("EZGH Compute\n"), 0o600)
 	}
 	t.Cleanup(func() { productNamePath = old })
-	return f, &http.Client{Transport: rewrite{u}}
+	return f, f.srv.Client()
 }
 
 func TestInstanceCredentialsRecover(t *testing.T) {
 	f, hc := newInstanceFake(t, true)
 	f.keys = []string{instKey1, instKey2}
-	c, err := NewClient(ClientOptions{OrganizationID: "o", ProjectID: "p", BaseURL: "http://api.test", HTTPClient: hc})
+	c, err := NewClient(ClientOptions{OrganizationID: "o", ProjectID: "p", BaseURL: f.srv.URL, HTTPClient: hc})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +133,7 @@ func TestInstanceProviderRefreshWindow(t *testing.T) {
 	f.keys = []string{instKey1, instKey2}
 	now := time.Now()
 	f.now = func() time.Time { return now }
-	p := &instanceProvider{endpoint: "http://m", httpc: hc, now: func() time.Time { return now }}
+	p := &instanceProvider{endpoint: f.srv.URL, httpc: hc, now: func() time.Time { return now }}
 	ctx := context.Background()
 	get := func() (string, error) { return p.key(ctx) }
 	if k, _ := get(); k != instKey1 {
@@ -171,7 +167,7 @@ func TestInstanceProviderRefreshWindow(t *testing.T) {
 
 func TestExplicitAPIKeyBeatsTheInstance(t *testing.T) {
 	f, hc := newInstanceFake(t, true)
-	c, err := NewClient(ClientOptions{APIKey: "ezgh_explicit", OrganizationID: "o", ProjectID: "p", BaseURL: "http://api.test", HTTPClient: hc})
+	c, err := NewClient(ClientOptions{APIKey: "ezgh_explicit", OrganizationID: "o", ProjectID: "p", BaseURL: f.srv.URL, HTTPClient: hc})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +194,7 @@ func TestInstanceProviderRateLimited(t *testing.T) {
 	now := time.Now()
 	start := now
 	f.now = func() time.Time { return now }
-	p := &instanceProvider{endpoint: "http://m", httpc: hc, now: func() time.Time { return now }}
+	p := &instanceProvider{endpoint: f.srv.URL, httpc: hc, now: func() time.Time { return now }}
 	ctx := context.Background()
 	if k, _ := p.key(ctx); k != instKey1 {
 		t.Fatal(k)
@@ -220,7 +216,7 @@ func TestInstanceProviderNotFoundIsTransient(t *testing.T) {
 	now := time.Now()
 	start := now
 	f.now = func() time.Time { return now }
-	p := &instanceProvider{endpoint: "http://m", httpc: hc, now: func() time.Time { return now }}
+	p := &instanceProvider{endpoint: f.srv.URL, httpc: hc, now: func() time.Time { return now }}
 	ctx := context.Background()
 	_, _ = p.key(ctx)
 	f.notFound = true
@@ -231,5 +227,75 @@ func TestInstanceProviderNotFoundIsTransient(t *testing.T) {
 	now = start.Add(11 * time.Minute)
 	if _, err := p.key(ctx); err == nil || errors.Is(err, ErrNoBot) {
 		t.Errorf("%v", err)
+	}
+}
+
+func TestNoKeyBacksOff(t *testing.T) {
+	f, hc := newInstanceFake(t, true)
+	now := time.Now()
+	start := now
+	f.now = func() time.Time { return now }
+	f.status, f.retryAfter = 429, "120"
+	p := &instanceProvider{endpoint: f.srv.URL, httpc: hc, now: func() time.Time { return now }}
+	ctx := context.Background()
+	if _, err := p.key(ctx); err == nil {
+		t.Fatal("no error")
+	}
+	gets := f.gets
+	now = start.Add(30 * time.Second)
+	if _, err := p.key(ctx); err == nil || f.gets != gets {
+		t.Errorf("asked again inside Retry-After: %v %d", err, f.gets-gets)
+	}
+	f.status = 0
+	now = start.Add(121 * time.Second)
+	if k, err := p.key(ctx); err != nil || k != instKey1 {
+		t.Errorf("%q %v", k, err)
+	}
+	f.status, f.notFound = 404, false
+	p.invalidate(instKey1)
+	if _, err := p.key(ctx); !errors.Is(err, ErrNoBot) {
+		t.Fatalf("%v", err)
+	}
+	gets = f.gets
+	if _, err := p.key(ctx); !errors.Is(err, ErrNoBot) || f.gets != gets {
+		t.Errorf("no_bot asked again: %v", err)
+	}
+}
+
+func TestMissingExpiryIsUnreadable(t *testing.T) {
+	f, hc := newInstanceFake(t, true)
+	f.noExpiry = true
+	p := &instanceProvider{endpoint: f.srv.URL, httpc: hc, now: time.Now}
+	if _, err := p.key(context.Background()); err == nil {
+		t.Error("accepted an answer without expiresAt")
+	}
+}
+
+// The metadata client is the provider's own: never a proxy (the session token and Bot key
+// must not cross one), a 1 s dial, no redirects, whatever the caller's HTTPClient is.
+func TestMetadataGoesDirect(t *testing.T) {
+	proxied := 0
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { proxied++; w.WriteHeader(502) }))
+	defer proxy.Close()
+	t.Setenv("HTTP_PROXY", proxy.URL)
+	t.Setenv("http_proxy", proxy.URL)
+	f, _ := newInstanceFake(t, true)
+	callers := &http.Client{} // DefaultTransport: honours HTTP_PROXY
+	c, err := NewClient(ClientOptions{OrganizationID: "o", ProjectID: "p", BaseURL: f.srv.URL, HTTPClient: callers})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Get(context.Background(), "run_1"); err != nil {
+		t.Fatal(err)
+	}
+	if proxied != 0 || f.metadataHit == 0 {
+		t.Errorf("proxy hits %d, metadata hits %d", proxied, f.metadataHit)
+	}
+	tr, ok := newMetadataClient().Transport.(*http.Transport)
+	if !ok || tr.Proxy != nil {
+		t.Error("the metadata client may use a proxy")
+	}
+	if newMetadataClient().CheckRedirect == nil {
+		t.Error("the metadata client follows redirects")
 	}
 }

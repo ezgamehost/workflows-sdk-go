@@ -135,7 +135,7 @@ func defaultWorkerID() string {
 
 // NewWorker checks the options and returns a worker; start it with Run.
 func NewWorker(o WorkerOptions) (*Worker, error) {
-	cred, ok := newCredential(o.APIKey, o.HTTPClient)
+	cred, ok := newCredential(o.APIKey)
 	if !ok || o.OrganizationID == "" || o.ProjectID == "" || o.App == "" {
 		return nil, errors.New("workflows.NewWorker needs APIKey, OrganizationID, ProjectID and App")
 	}

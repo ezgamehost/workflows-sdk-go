@@ -16,11 +16,14 @@ import (
 )
 
 const (
-	metadataEndpoint     = "http://169.254.169.254"
 	instanceRefreshAhead = 5 * time.Minute
 	metadataTokenTTL     = 6 * time.Hour
 	metadataRetryAfter   = 5 * time.Second
 )
+
+// metadataEndpoint and productNamePath are where an EZGH compute instance's metadata service and
+// SMBIOS product name are; tests point them elsewhere.
+var metadataEndpoint = "http://169.254.169.254"
 
 // productNamePath is where an EZGH compute instance's SMBIOS product name is; tests point it
 // elsewhere.
@@ -39,17 +42,25 @@ type credential struct {
 
 // newCredential returns the API key if there is one, else the instance's credentials when this
 // machine is an EZGH compute instance, else ok is false. No network is touched here.
-func newCredential(apiKey string, httpc *http.Client) (c credential, ok bool) {
+func newCredential(apiKey string) (c credential, ok bool) {
 	if apiKey != "" {
 		return credential{static: secret(apiKey)}, true
 	}
 	if b, err := os.ReadFile(productNamePath); err != nil || strings.TrimSpace(string(b)) != "EZGH Compute" {
 		return credential{}, false
 	}
-	if httpc == nil {
-		httpc = &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{DialContext: (&net.Dialer{Timeout: time.Second}).DialContext}}
+	return credential{inst: &instanceProvider{endpoint: metadataEndpoint, httpc: newMetadataClient(), now: time.Now}}, true
+}
+
+// newMetadataClient is the provider's own client, never the caller's: no proxy (the session
+// token and the Bot's key must not cross one, and hostd refuses forwarded requests), a 1 s dial,
+// no redirects.
+func newMetadataClient() *http.Client {
+	return &http.Client{
+		Timeout:       10 * time.Second,
+		Transport:     &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: time.Second}).DialContext},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
-	return credential{inst: &instanceProvider{endpoint: metadataEndpoint, httpc: httpc, now: time.Now}}, true
 }
 
 // key is the key for the next request.
@@ -81,6 +92,7 @@ type instanceProvider struct {
 	apiKey    string
 	expiresAt time.Time
 	nextTry   time.Time
+	lastErr   error
 	retry     time.Duration // the metadata service's Retry-After (503, 429) on the last answer
 }
 
@@ -92,10 +104,11 @@ func (p *instanceProvider) key(ctx context.Context) (string, error) {
 		return p.apiKey, nil
 	}
 	var err error
-	if p.apiKey == "" || !now.Before(p.nextTry) {
+	if !now.Before(p.nextTry) {
 		if err = p.fetch(ctx); err == nil {
 			return p.apiKey, nil
 		}
+		p.lastErr = err
 		p.nextTry = now.Add(max(metadataRetryAfter, p.retry))
 		if errors.Is(err, ErrNoBot) {
 			p.apiKey = ""
@@ -106,7 +119,10 @@ func (p *instanceProvider) key(ctx context.Context) (string, error) {
 		return p.apiKey, nil
 	}
 	if err == nil {
-		err = errors.New("instance credentials expired and the metadata service is not answering")
+		// Backing off: report the failure that started it, without asking again.
+		if err = p.lastErr; err == nil {
+			err = errors.New("instance credentials expired and the metadata service is not answering")
+		}
 	}
 	return "", err
 }
@@ -136,7 +152,7 @@ func (p *instanceProvider) fetch(ctx context.Context) error {
 				APIKey    string    `json:"apiKey"`
 				ExpiresAt time.Time `json:"expiresAt"`
 			}
-			if err := json.Unmarshal(body, &c); err != nil || c.APIKey == "" {
+			if err := json.Unmarshal(body, &c); err != nil || c.APIKey == "" || c.ExpiresAt.IsZero() {
 				return errors.New("instance metadata sent an unreadable answer")
 			}
 			p.apiKey, p.expiresAt = c.APIKey, c.ExpiresAt
