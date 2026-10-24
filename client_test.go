@@ -185,7 +185,7 @@ func TestCompleteCallbackURL(t *testing.T) {
 
 func TestAPIKeyNeverPrints(t *testing.T) {
 	c, _ := NewClient(ClientOptions{APIKey: "ezgh_SECRETSECRET", OrganizationID: "o", ProjectID: "p"})
-	for _, s := range []string{fmt.Sprint(c), fmt.Sprintf("%+v", c), fmt.Sprintf("%#v", c), fmt.Sprintf("%v", *c), fmt.Sprintf("%s", c), fmt.Sprintf("%#v", *c), fmt.Sprintf("%v", c.key)} {
+	for _, s := range []string{fmt.Sprint(c), fmt.Sprintf("%+v", c), fmt.Sprintf("%#v", c), fmt.Sprintf("%v", *c), fmt.Sprintf("%s", c), fmt.Sprintf("%#v", *c), fmt.Sprintf("%v", c.cred.static)} {
 		if strings.Contains(s, "SECRETSECRET") {
 			t.Fatalf("printed: %s", s)
 		}

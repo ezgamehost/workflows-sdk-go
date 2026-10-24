@@ -26,7 +26,8 @@ const DefaultBaseURL = "https://workflows-api.ezghcloud.com"
 type ClientOptions struct {
 	// APIKey is an EZGH API key (or another bearer credential) allowed the workflows actions the
 	// client uses: run methods take an API key or a workflows:runs token; app and schedule methods
-	// need workflows.apps.* or workflows.schedules.*.
+	// need workflows.apps.* or workflows.schedules.*. Omitted on an EZGH compute instance with a
+	// Bot attached: the client then uses the Bot's short-lived key from the metadata service.
 	APIKey         string
 	OrganizationID string
 	ProjectID      string
@@ -43,7 +44,7 @@ type ClientOptions struct {
 // Client calls the Workflows API for one project: apps, runs, callbacks and schedules. Its API
 // key never appears when the client is printed, logged or marshalled.
 type Client struct {
-	key      secret
+	cred     credential
 	base     string
 	httpc    *http.Client
 	retries  int
@@ -58,7 +59,8 @@ func (c Client) MarshalJSON() ([]byte, error) { return json.Marshal(map[string]s
 
 // NewClient checks the options and returns a client.
 func NewClient(o ClientOptions) (*Client, error) {
-	if o.APIKey == "" || o.OrganizationID == "" || o.ProjectID == "" {
+	cred, ok := newCredential(o.APIKey, o.HTTPClient)
+	if !ok || o.OrganizationID == "" || o.ProjectID == "" {
 		return nil, errors.New("workflows.NewClient needs APIKey, OrganizationID and ProjectID")
 	}
 	base := strings.TrimRight(o.BaseURL, "/")
@@ -68,7 +70,7 @@ func NewClient(o ClientOptions) (*Client, error) {
 	if _, err := url.Parse(base); err != nil {
 		return nil, fmt.Errorf("workflows.NewClient: BaseURL: %w", err)
 	}
-	c := &Client{key: secret(o.APIKey), base: base + "/v1/organizations/" + url.PathEscape(o.OrganizationID) + "/projects/" + url.PathEscape(o.ProjectID),
+	c := &Client{cred: cred, base: base + "/v1/organizations/" + url.PathEscape(o.OrganizationID) + "/projects/" + url.PathEscape(o.ProjectID),
 		httpc: noRedirects(o.HTTPClient), retries: 3, maxDelay: 10 * time.Second}
 	if o.Retries != nil {
 		if *o.Retries < 0 {
@@ -164,6 +166,7 @@ func (c *Client) do(ctx context.Context, r request) error {
 	if r.method != http.MethodGet && r.key == "" {
 		r.key = newKey()
 	}
+	reauth := false // an instance key the API refused is replaced once per call
 	for attempt := 0; ; attempt++ {
 		var body io.Reader
 		if payload != nil {
@@ -173,7 +176,11 @@ func (c *Client) do(ctx context.Context, r request) error {
 		if err != nil {
 			return err
 		}
-		req.Header.Set("Authorization", "Bearer "+c.key.reveal())
+		key, err := c.cred.key(ctx)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", "Bearer "+key)
 		req.Header.Set("Accept", "application/json")
 		if payload != nil {
 			req.Header.Set("Content-Type", "application/json")
@@ -216,6 +223,11 @@ func (c *Client) do(ctx context.Context, r request) error {
 			return json.Unmarshal(data, r.out)
 		}
 		ae := apiError(res, data)
+		if res.StatusCode == http.StatusUnauthorized && !reauth && c.cred.refused(key) {
+			reauth = true
+			attempt--
+			continue
+		}
 		if r.noResend && res.StatusCode == http.StatusServiceUnavailable {
 			// A 503 may come after the request took effect: a resend would answer no secret.
 			return &APIError{Status: 0, Code: "outcome_unknown", Message: "the API answered 503 (" + ae.Message + "), so the request may have taken effect: a resend would return no secret. Check with GetApp, and rotate the app's secret if you didn't receive it", RetryAfter: ae.RetryAfter}

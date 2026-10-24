@@ -32,7 +32,8 @@ const DefaultLiveURL = "https://workflows-live.ezghcloud.com"
 // WorkerOptions configures a pull worker.
 type WorkerOptions struct {
 	// APIKey is an EZGH API key allowed workflows.workers.poll (and workflows.apps.sync, to
-	// announce the workflows).
+	// announce the workflows). Omitted on an EZGH compute instance with a Bot attached: the worker
+	// then uses the Bot's short-lived key from the metadata service.
 	APIKey         string
 	OrganizationID string
 	ProjectID      string
@@ -74,7 +75,8 @@ type WorkerOptions struct {
 // queue, runs them, heartbeats while they run, and completes them.
 type Worker struct {
 	o        WorkerOptions
-	key      secret
+	cred     credential
+	reauthed bool // Run: an instance key the API refused was replaced, once
 	byName   map[string]*definition
 	infos    []protocol.WorkflowInfo
 	pollURL  string
@@ -133,7 +135,8 @@ func defaultWorkerID() string {
 
 // NewWorker checks the options and returns a worker; start it with Run.
 func NewWorker(o WorkerOptions) (*Worker, error) {
-	if o.APIKey == "" || o.OrganizationID == "" || o.ProjectID == "" || o.App == "" {
+	cred, ok := newCredential(o.APIKey, o.HTTPClient)
+	if !ok || o.OrganizationID == "" || o.ProjectID == "" || o.App == "" {
 		return nil, errors.New("workflows.NewWorker needs APIKey, OrganizationID, ProjectID and App")
 	}
 	byName, order, err := definitions(o.Workflows, "workflows.NewWorker")
@@ -183,7 +186,7 @@ func NewWorker(o WorkerOptions) (*Worker, error) {
 	if o.Logger == nil {
 		o.Logger = slog.Default()
 	}
-	w := &Worker{o: o, key: secret(o.APIKey), byName: byName, sem: make(chan struct{}, o.MaxConcurrent), log: o.Logger}
+	w := &Worker{o: o, cred: cred, byName: byName, sem: make(chan struct{}, o.MaxConcurrent), log: o.Logger}
 	w.o.APIKey = ""
 	for _, d := range order {
 		w.infos = append(w.infos, d.info())
@@ -234,6 +237,10 @@ func (w *Worker) Run(ctx context.Context) error {
 			break
 		}
 		var ae *APIError
+		if errors.As(err, &ae) && ae.Status == http.StatusUnauthorized && w.cred.inst != nil && !w.reauthed {
+			w.reauthed = true // the instance key was replaced in poll: poll again once
+			continue
+		}
 		if errors.As(err, &ae) && ae.Status != http.StatusTooManyRequests && ae.Status < 500 {
 			fatal = err
 			break
@@ -247,7 +254,7 @@ func (w *Worker) Run(ctx context.Context) error {
 			sleepCtx(ctx, wait)
 			continue
 		}
-		w.failures = 0
+		w.failures, w.reauthed = 0, false
 		for i := range invs {
 			inv := invs[i]
 			w.sem <- struct{}{}
@@ -330,7 +337,11 @@ func (w *Worker) poll(ctx context.Context, maxTasks int) ([]json.RawMessage, tim
 	if err != nil {
 		return nil, time.Time{}, time.Time{}, &APIError{Status: http.StatusBadRequest, Code: "invalid_live_url", Message: err.Error()}
 	}
-	req.Header.Set("Authorization", "Bearer "+w.key.reveal())
+	apiKey, err := w.cred.key(ctx)
+	if err != nil {
+		return nil, time.Time{}, time.Time{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	res, err := w.o.HTTPClient.Do(req)
@@ -345,6 +356,9 @@ func (w *Worker) poll(ctx context.Context, maxTasks int) ([]json.RawMessage, tim
 		return nil, receivedAt, time.Time{}, nil
 	}
 	if res.StatusCode != http.StatusOK {
+		if res.StatusCode == http.StatusUnauthorized {
+			w.cred.refused(apiKey)
+		}
 		return nil, receivedAt, time.Time{}, apiError(res, data)
 	}
 	if err != nil {

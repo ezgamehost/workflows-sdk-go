@@ -367,6 +367,15 @@ err = w.Run(ctx) // until ctx is done; then it drains running invocations
   workflows.
 - The client never prints, logs or marshals its API key.
 
+### On an EZGH compute instance
+
+Leave `APIKey` empty on an EZGH compute instance that has a Bot attached, and the client, the
+queues client and the worker use the Bot's short-lived key from the instance's metadata service.
+They fetch it when needed, refresh it 5 minutes before it expires, and fetch once more and
+retry once when the API answers 401. The Bot needs the actions above, like any key. An explicit
+`APIKey` always wins; off an instance (or with no Bot attached, `ErrNoBot`) an empty key is still
+an error. Anything on the instance can fetch the Bot's key, containers included.
+
 ## Determinism rules for Go
 
 Code outside steps runs again on every invocation, so keep it deterministic and free of side

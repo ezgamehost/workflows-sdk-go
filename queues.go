@@ -25,7 +25,8 @@ const DefaultQueuesBaseURL = "https://queues-api.ezghcloud.com"
 // QueuesClientOptions configures a QueuesClient for one project.
 type QueuesClientOptions struct {
 	// APIKey is an EZGH API key (or another bearer credential) allowed queues.messages.send on the
-	// queues the client sends to.
+	// queues the client sends to. Omitted on an EZGH compute instance with a Bot attached: the
+	// client then uses the Bot's short-lived key from the metadata service.
 	APIKey         string
 	OrganizationID string
 	ProjectID      string
@@ -43,7 +44,7 @@ type QueuesClientOptions struct {
 // Send directly outside a workflow. Its API key never appears when the client is printed, logged
 // or marshalled.
 type QueuesClient struct {
-	key      secret
+	cred     credential
 	base     string
 	httpc    *http.Client
 	retries  int
@@ -60,7 +61,8 @@ func (c QueuesClient) MarshalJSON() ([]byte, error) {
 
 // NewQueuesClient checks the options and returns a client.
 func NewQueuesClient(o QueuesClientOptions) (*QueuesClient, error) {
-	if o.APIKey == "" || o.OrganizationID == "" || o.ProjectID == "" {
+	cred, ok := newCredential(o.APIKey, o.HTTPClient)
+	if !ok || o.OrganizationID == "" || o.ProjectID == "" {
 		return nil, errors.New("workflows.NewQueuesClient needs APIKey, OrganizationID and ProjectID")
 	}
 	base := strings.TrimRight(o.BaseURL, "/")
@@ -70,7 +72,7 @@ func NewQueuesClient(o QueuesClientOptions) (*QueuesClient, error) {
 	if _, err := url.Parse(base); err != nil {
 		return nil, fmt.Errorf("workflows.NewQueuesClient: BaseURL: %w", err)
 	}
-	c := &QueuesClient{key: secret(o.APIKey), base: base + "/v1/organizations/" + url.PathEscape(o.OrganizationID) + "/projects/" + url.PathEscape(o.ProjectID),
+	c := &QueuesClient{cred: cred, base: base + "/v1/organizations/" + url.PathEscape(o.OrganizationID) + "/projects/" + url.PathEscape(o.ProjectID),
 		httpc: noRedirects(o.HTTPClient), retries: 3, maxDelay: 10 * time.Second}
 	if o.Retries != nil {
 		if *o.Retries < 0 {
@@ -210,12 +212,17 @@ func (c *QueuesClient) Send(ctx context.Context, queueID string, msgs []QueueMes
 		return nil, err
 	}
 	target := c.base + "/queues/" + url.PathEscape(queueID) + "/messages"
+	reauth := false // an instance key the API refused is replaced once per call
 	for attempt := 0; ; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(payload))
 		if err != nil {
 			return nil, err
 		}
-		req.Header.Set("Authorization", "Bearer "+c.key.reveal())
+		apiKey, err := c.cred.key(ctx)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+apiKey)
 		req.Header.Set("Accept", "application/json")
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Idempotency-Key", key)
@@ -243,6 +250,11 @@ func (c *QueuesClient) Send(ctx context.Context, queueID string, msgs []QueueMes
 			return &out, nil
 		}
 		ae := queuesAPIError(res, data)
+		if res.StatusCode == http.StatusUnauthorized && !reauth && c.cred.refused(apiKey) {
+			reauth = true
+			attempt--
+			continue
+		}
 		if !ae.resendable() || attempt >= c.retries {
 			return nil, ae
 		}
