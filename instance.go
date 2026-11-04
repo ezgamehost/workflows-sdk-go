@@ -21,9 +21,10 @@ const (
 	metadataRetryAfter   = 5 * time.Second
 )
 
-// metadataEndpoint and productNamePath are where an EZGH compute instance's metadata service and
-// SMBIOS product name are; tests point them elsewhere.
-var metadataEndpoint = "http://169.254.169.254"
+// metadataEndpoints is where an EZGH compute instance's metadata service answers: IPv4 first, then
+// IPv6, which an IPv6-only instance only has (there the IPv4 dial fails at once, network
+// unreachable). Tests point it elsewhere.
+var metadataEndpoints = []string{"http://169.254.169.254", "http://[fd65:7a67:6800::254]"}
 
 // productNamePath is where an EZGH compute instance's SMBIOS product name is; tests point it
 // elsewhere.
@@ -49,7 +50,7 @@ func newCredential(apiKey string) (c credential, ok bool) {
 	if b, err := os.ReadFile(productNamePath); err != nil || strings.TrimSpace(string(b)) != "EZGH Compute" {
 		return credential{}, false
 	}
-	return credential{inst: &instanceProvider{endpoint: metadataEndpoint, httpc: newMetadataClient(), now: time.Now}}, true
+	return credential{inst: &instanceProvider{httpc: newMetadataClient(), now: time.Now}}, true
 }
 
 // newMetadataClient is the provider's own client, never the caller's: no proxy (the session
@@ -82,7 +83,7 @@ func (c credential) refused(key string) bool {
 }
 
 type instanceProvider struct {
-	endpoint string
+	endpoint string // when set, the only address tried; else metadataEndpoints
 	httpc    *http.Client
 	now      func() time.Time
 
@@ -94,6 +95,7 @@ type instanceProvider struct {
 	nextTry   time.Time
 	lastErr   error
 	retry     time.Duration // the metadata service's Retry-After (503, 429) on the last answer
+	at        int           // index in metadataEndpoints of the address that last answered
 }
 
 func (p *instanceProvider) key(ctx context.Context) (string, error) {
@@ -181,7 +183,27 @@ func (p *instanceProvider) newToken(ctx context.Context) error {
 }
 
 func (p *instanceProvider) do(ctx context.Context, method, path string, h http.Header) (int, []byte, error) {
-	req, err := http.NewRequestWithContext(ctx, method, p.endpoint+path, nil)
+	if p.endpoint != "" {
+		return p.doAt(ctx, p.endpoint, method, path, h)
+	}
+	// Try each address, starting from the one that last answered; any HTTP answer is final.
+	var errs []error
+	for i := range metadataEndpoints {
+		at := (p.at + i) % len(metadataEndpoints)
+		status, body, err := p.doAt(ctx, metadataEndpoints[at], method, path, h)
+		if err == nil {
+			p.at = at
+			return status, body, nil
+		}
+		if errs = append(errs, err); ctx.Err() != nil {
+			break
+		}
+	}
+	return 0, nil, errors.Join(errs...)
+}
+
+func (p *instanceProvider) doAt(ctx context.Context, endpoint, method, path string, h http.Header) (int, []byte, error) {
+	req, err := http.NewRequestWithContext(ctx, method, endpoint+path, nil)
 	if err != nil {
 		return 0, nil, err
 	}

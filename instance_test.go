@@ -87,9 +87,9 @@ func newInstanceFake(t *testing.T, onInstance bool) (*instanceFake, *http.Client
 		}
 	}))
 	t.Cleanup(f.srv.Close)
-	oldEndpoint := metadataEndpoint
-	metadataEndpoint = f.srv.URL
-	t.Cleanup(func() { metadataEndpoint = oldEndpoint })
+	oldEndpoints := metadataEndpoints
+	metadataEndpoints = []string{f.srv.URL}
+	t.Cleanup(func() { metadataEndpoints = oldEndpoints })
 	old := productNamePath
 	productNamePath = filepath.Join(t.TempDir(), "product_name")
 	if onInstance {
@@ -297,5 +297,21 @@ func TestMetadataGoesDirect(t *testing.T) {
 	}
 	if newMetadataClient().CheckRedirect == nil {
 		t.Error("the metadata client follows redirects")
+	}
+}
+
+// An IPv6-only instance can't reach 169.254.169.254: the provider falls through to the next
+// address and keeps using the one that answered.
+func TestInstanceProviderFallsBackToNextAddress(t *testing.T) {
+	f, hc := newInstanceFake(t, true)
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closed.Close()                                      // connection refused, like network unreachable: no HTTP answer
+	metadataEndpoints = []string{closed.URL, f.srv.URL} // newInstanceFake restores it
+	p := &instanceProvider{httpc: hc, now: time.Now}
+	if k, err := p.key(context.Background()); err != nil || k != instKey1 {
+		t.Fatalf("key = %q, %v", k, err)
+	}
+	if p.at != 1 {
+		t.Fatalf("at = %d, want the address that answered", p.at)
 	}
 }
