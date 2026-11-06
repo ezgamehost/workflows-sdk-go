@@ -32,8 +32,9 @@ const DefaultLiveURL = "https://workflows-live.ezghcloud.com"
 // WorkerOptions configures a pull worker.
 type WorkerOptions struct {
 	// APIKey is an EZGH API key allowed workflows.workers.poll (and workflows.apps.sync, to
-	// announce the workflows). Omitted on an EZGH compute instance with a Bot attached: the worker
-	// then uses the Bot's short-lived key from the metadata service.
+	// announce the workflows). Omitted in an EZGH Kubernetes pod with pod identity or on an EZGH
+	// compute instance with a Bot attached: the worker then uses the Bot's short-lived key from the
+	// pod identity agent or the metadata service.
 	APIKey         string
 	OrganizationID string
 	ProjectID      string
@@ -237,7 +238,7 @@ func (w *Worker) Run(ctx context.Context) error {
 			break
 		}
 		var ae *APIError
-		if errors.As(err, &ae) && ae.Status == http.StatusUnauthorized && w.cred.inst != nil && !w.reauthed {
+		if errors.As(err, &ae) && ae.Status == http.StatusUnauthorized && w.cred.dyn != nil && !w.reauthed {
 			w.reauthed = true // the instance key was replaced in poll: poll again once
 			continue
 		}

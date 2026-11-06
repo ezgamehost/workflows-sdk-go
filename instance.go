@@ -34,28 +34,40 @@ var productNamePath = "/sys/class/dmi/id/product_name"
 // instance credentials.
 var ErrNoBot = errors.New("this instance has no Bot attached")
 
-// credential is what a client authenticates with: its API key, or, when none was given and the
-// code runs on an EZGH compute instance, the key of the instance's Bot from the metadata service.
+// credential is what a client authenticates with: its API key, or, when none was given, a Bot's
+// temporary key: the pod's from the pod identity agent when EZGH_CONTAINER_CREDENTIALS_FULL_URI
+// is set, else, on an EZGH compute instance, the instance's from the metadata service.
 type credential struct {
 	static secret
-	inst   *instanceProvider
+	dyn    keySource
 }
 
-// newCredential returns the API key if there is one, else the instance's credentials when this
-// machine is an EZGH compute instance, else ok is false. No network is touched here.
+// keySource supplies a Bot's temporary keys: containerProvider or instanceProvider.
+type keySource interface {
+	key(ctx context.Context) (string, error)
+	invalidate(refused string)
+}
+
+// newCredential returns the API key if there is one, else the container's credentials when
+// EZGH_CONTAINER_CREDENTIALS_FULL_URI is set, else the instance's credentials when this machine
+// is an EZGH compute instance, else ok is false. No network is touched here.
 func newCredential(apiKey string) (c credential, ok bool) {
 	if apiKey != "" {
 		return credential{static: secret(apiKey)}, true
 	}
+	if uri := os.Getenv(envContainerURI); uri != "" {
+		// Never a fall-through to the instance: a bad URI or token file fails at the first request.
+		return credential{dyn: &containerProvider{uri: uri, tokenFile: os.Getenv(envContainerTokenFile), httpc: newMetadataClient(), now: time.Now}}, true
+	}
 	if b, err := os.ReadFile(productNamePath); err != nil || strings.TrimSpace(string(b)) != "EZGH Compute" {
 		return credential{}, false
 	}
-	return credential{inst: &instanceProvider{httpc: newMetadataClient(), now: time.Now}}, true
+	return credential{dyn: &instanceProvider{httpc: newMetadataClient(), now: time.Now}}, true
 }
 
-// newMetadataClient is the provider's own client, never the caller's: no proxy (the session
-// token and the Bot's key must not cross one, and hostd refuses forwarded requests), a 1 s dial,
-// no redirects.
+// newMetadataClient is the providers' own client, never the caller's: no proxy (the session or
+// service account token and the Bot's key must not cross one, and hostd refuses forwarded
+// requests), a 1 s dial, no redirects.
 func newMetadataClient() *http.Client {
 	return &http.Client{
 		Timeout:       10 * time.Second,
@@ -66,19 +78,19 @@ func newMetadataClient() *http.Client {
 
 // key is the key for the next request.
 func (c credential) key(ctx context.Context) (string, error) {
-	if c.inst == nil {
+	if c.dyn == nil {
 		return c.static.reveal(), nil
 	}
-	return c.inst.key(ctx)
+	return c.dyn.key(ctx)
 }
 
 // refused is called with the key a request used when the API answered 401. It reports whether
-// the request is worth one retry (only instance credentials change).
+// the request is worth one retry (only container and instance credentials change).
 func (c credential) refused(key string) bool {
-	if c.inst == nil {
+	if c.dyn == nil {
 		return false
 	}
-	c.inst.invalidate(key)
+	c.dyn.invalidate(key)
 	return true
 }
 

@@ -26,8 +26,9 @@ const DefaultBaseURL = "https://workflows-api.ezghcloud.com"
 type ClientOptions struct {
 	// APIKey is an EZGH API key (or another bearer credential) allowed the workflows actions the
 	// client uses: run methods take an API key or a workflows:runs token; app and schedule methods
-	// need workflows.apps.* or workflows.schedules.*. Omitted on an EZGH compute instance with a
-	// Bot attached: the client then uses the Bot's short-lived key from the metadata service.
+	// need workflows.apps.* or workflows.schedules.*. Omitted in an EZGH Kubernetes pod with pod
+	// identity or on an EZGH compute instance with a Bot attached: the client then uses the Bot's
+	// short-lived key from the pod identity agent or the metadata service.
 	APIKey         string
 	OrganizationID string
 	ProjectID      string

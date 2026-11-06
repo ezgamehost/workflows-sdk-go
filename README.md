@@ -376,6 +376,17 @@ retry once when the API answers 401. The Bot needs the actions above, like any k
 `APIKey` always wins; off an instance (or with no Bot attached, `ErrNoBot`) an empty key is still
 an error. Anything on the instance can fetch the Bot's key, containers included.
 
+### In an EZGH Kubernetes pod
+
+**[built, waiting for EZGH Kubernetes to launch]** With `APIKey` empty, a pod whose service account
+has a pod identity association uses its Bot's short-lived key from the node's pod identity agent,
+ahead of instance credentials. EZGH Kubernetes injects `EZGH_CONTAINER_CREDENTIALS_FULL_URI` and
+`EZGH_CONTAINER_AUTHORIZATION_TOKEN_FILE`; the SDK `GET`s the URI with the token file's contents
+(read afresh each time, as kubelet rotates it) as a bearer token, directly (no proxy, 1 s connect
+timeout), and refreshes and retries on 401 as above. The URI must be `http` to `169.254.170.23`,
+`[fd65:7a67:6800::23]` or a loopback address, or no request is made. Once the URI is set, a bad URI
+or an unreadable token file is an error, never a fall-back to the node's instance credentials.
+
 ## Determinism rules for Go
 
 Code outside steps runs again on every invocation, so keep it deterministic and free of side

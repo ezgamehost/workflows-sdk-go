@@ -25,8 +25,9 @@ const DefaultQueuesBaseURL = "https://queues-api.ezghcloud.com"
 // QueuesClientOptions configures a QueuesClient for one project.
 type QueuesClientOptions struct {
 	// APIKey is an EZGH API key (or another bearer credential) allowed queues.messages.send on the
-	// queues the client sends to. Omitted on an EZGH compute instance with a Bot attached: the
-	// client then uses the Bot's short-lived key from the metadata service.
+	// queues the client sends to. Omitted in an EZGH Kubernetes pod with pod identity or on an EZGH
+	// compute instance with a Bot attached: the client then uses the Bot's short-lived key from the
+	// pod identity agent or the metadata service.
 	APIKey         string
 	OrganizationID string
 	ProjectID      string
