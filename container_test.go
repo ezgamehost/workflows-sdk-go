@@ -250,3 +250,30 @@ func TestContainerRetryAfterResets(t *testing.T) {
 		t.Errorf("next try in %s", p.nextTry.Sub(now))
 	}
 }
+
+// A fetch that outlives the key: no expired key is returned, and the backoff runs from its end.
+func TestContainerSlowFailedFetchRereadsTheClock(t *testing.T) {
+	f := newAgentFake(t)
+	start := time.Now()
+	f.now = func() time.Time { return start }
+	p := &containerProvider{uri: f.srv.URL + "/v1/credentials", tokenFile: writeToken(t, "sa"), httpc: f.srv.Client(), now: func() time.Time { return start }}
+	ctx := context.Background()
+	if k, _ := p.key(ctx); k != podKey {
+		t.Fatal(k)
+	}
+	f.status = 503
+	calls := 0
+	p.now = func() time.Time { // 6 min in when the fetch starts (refresh due), 11 min when it ends
+		if calls++; calls == 1 {
+			return start.Add(6 * time.Minute)
+		}
+		return start.Add(11 * time.Minute)
+	}
+	if k, err := p.key(ctx); k != "" || err == nil || !strings.Contains(err.Error(), "503") {
+		t.Fatalf("%q %v", k, err)
+	}
+	gets := f.gets
+	if _, err := p.key(ctx); err == nil || f.gets != gets { // within 5 s of the fetch's end
+		t.Errorf("%v, asked again: %v", err, f.gets != gets)
+	}
+}

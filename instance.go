@@ -122,6 +122,7 @@ func (p *instanceProvider) key(ctx context.Context) (string, error) {
 		if err = p.fetch(ctx); err == nil {
 			return p.apiKey, nil
 		}
+		now = p.now() // the fetch may have taken seconds
 		p.lastErr = err
 		p.nextTry = now.Add(max(metadataRetryAfter, p.retry))
 		if errors.Is(err, ErrNoBot) {
