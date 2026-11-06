@@ -19,6 +19,7 @@ const (
 	instanceRefreshAhead = 5 * time.Minute
 	metadataTokenTTL     = 6 * time.Hour
 	metadataRetryAfter   = 5 * time.Second
+	maxRetryAfter        = 300 // seconds: a longer Retry-After is capped
 )
 
 // metadataEndpoints is where an EZGH compute instance's metadata service answers: IPv4 first, then
@@ -119,7 +120,12 @@ func (p *instanceProvider) key(ctx context.Context) (string, error) {
 	}
 	var err error
 	if !now.Before(p.nextTry) {
-		if err = p.fetch(ctx); err == nil {
+		if err = ctx.Err(); err != nil {
+			return "", err // the caller gave up: not a failed fetch, so no backoff for anyone else
+		}
+		// Not the caller's context: under the lock the fetch serves every waiting caller, so one
+		// caller's cancellation mustn't fail it. The client's 10 s timeout bounds it.
+		if err = p.fetch(context.WithoutCancel(ctx)); err == nil {
 			return p.apiKey, nil
 		}
 		now = p.now() // the fetch may have taken seconds
@@ -234,7 +240,7 @@ func (p *instanceProvider) doAt(ctx context.Context, endpoint, method, path stri
 	defer res.Body.Close()
 	p.retry = 0
 	if n, err := strconv.Atoi(res.Header.Get("Retry-After")); err == nil && n > 0 {
-		p.retry = time.Duration(n) * time.Second
+		p.retry = time.Duration(min(n, maxRetryAfter)) * time.Second
 	}
 	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<16))
 	return res.StatusCode, b, nil

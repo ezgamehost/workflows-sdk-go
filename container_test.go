@@ -28,6 +28,7 @@ type agentFake struct {
 	apiRefuses map[string]bool
 	apiAuth    []string
 	now        func() time.Time
+	onGet      func() // called on each agent request, before answering
 }
 
 func newAgentFake(t *testing.T) *agentFake {
@@ -47,6 +48,9 @@ func newAgentFake(t *testing.T) *agentFake {
 			return
 		}
 		f.gets++
+		if f.onGet != nil {
+			f.onGet()
+		}
 		f.tokens = append(f.tokens, strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
 		if f.status != 0 {
 			if f.retryAfter != "" {
@@ -275,5 +279,51 @@ func TestContainerSlowFailedFetchRereadsTheClock(t *testing.T) {
 	gets := f.gets
 	if _, err := p.key(ctx); err == nil || f.gets != gets { // within 5 s of the fetch's end
 		t.Errorf("%v, asked again: %v", err, f.gets != gets)
+	}
+}
+
+func TestContainerCapsRetryAfter(t *testing.T) {
+	f := newAgentFake(t)
+	f.status, f.retryAfter = 503, "3600"
+	now := time.Now()
+	p := &containerProvider{uri: f.srv.URL + "/v1/credentials", tokenFile: writeToken(t, "sa"), httpc: f.srv.Client(), now: func() time.Time { return now }}
+	_, _ = p.key(context.Background())
+	if d := p.nextTry.Sub(now); d != 300*time.Second {
+		t.Errorf("next try in %s", d)
+	}
+}
+
+// One caller's cancellation neither fails the fetch it started nor backs off the others.
+func TestContainerCallerCancellation(t *testing.T) {
+	f := newAgentFake(t)
+	p := &containerProvider{uri: f.srv.URL + "/v1/credentials", tokenFile: writeToken(t, "sa"), httpc: f.srv.Client(), now: time.Now}
+	gone, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := p.key(gone); err != context.Canceled || f.gets != 0 {
+		t.Fatalf("%v, %d gets", err, f.gets)
+	}
+	if k, err := p.key(context.Background()); k != podKey || err != nil {
+		t.Fatalf("backed off after a cancellation: %q %v", k, err)
+	}
+	// Cancelled while the agent answers: the fetch still lands.
+	p.invalidate(podKey)
+	ctx, cancel := context.WithCancel(context.Background())
+	f.onGet = cancel
+	if k, err := p.key(ctx); k != podKey || err != nil {
+		t.Errorf("%q %v", k, err)
+	}
+}
+
+// A caller that gave up doesn't back off the instance provider for the others.
+func TestInstanceCallerCancellation(t *testing.T) {
+	f, hc := newInstanceFake(t, true)
+	p := &instanceProvider{endpoint: f.srv.URL, httpc: hc, now: time.Now}
+	gone, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := p.key(gone); err != context.Canceled || f.metadataHit != 0 {
+		t.Fatalf("%v, %d metadata requests", err, f.metadataHit)
+	}
+	if k, err := p.key(context.Background()); k != instKey1 || err != nil {
+		t.Errorf("backed off after a cancellation: %q %v", k, err)
 	}
 }
