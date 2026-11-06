@@ -232,3 +232,21 @@ func TestContainerMissingTokenIsAnError(t *testing.T) {
 		t.Errorf("metadata %d, agent %d, api %v", inst.metadataHit, f.gets, f.apiAuth)
 	}
 }
+
+// A Retry-After from an earlier answer doesn't stretch the backoff after a connection failure.
+func TestContainerRetryAfterResets(t *testing.T) {
+	f := newAgentFake(t)
+	f.status, f.retryAfter = 503, "60"
+	now := time.Now()
+	p := &containerProvider{uri: f.srv.URL + "/v1/credentials", tokenFile: writeToken(t, "sa"), httpc: f.srv.Client(), now: func() time.Time { return now }}
+	ctx := context.Background()
+	if _, err := p.key(ctx); err == nil {
+		t.Fatal("no error")
+	}
+	now = now.Add(time.Minute)
+	f.srv.Close() // the agent is gone: unreachable, no Retry-After
+	_, _ = p.key(ctx)
+	if p.nextTry != now.Add(metadataRetryAfter) {
+		t.Errorf("next try in %s", p.nextTry.Sub(now))
+	}
+}

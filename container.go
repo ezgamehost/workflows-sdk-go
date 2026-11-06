@@ -93,6 +93,7 @@ func checkContainerURI(raw string) error {
 }
 
 func (p *containerProvider) fetch(ctx context.Context) error {
+	p.retry = 0 // a past Retry-After mustn't stretch the backoff after a refusal or a dead agent
 	if err := checkContainerURI(p.uri); err != nil {
 		return err
 	}
@@ -118,7 +119,6 @@ func (p *containerProvider) fetch(ctx context.Context) error {
 		return fmt.Errorf("pod identity agent unreachable: %w", err)
 	}
 	defer res.Body.Close()
-	p.retry = 0
 	if n, err := strconv.Atoi(res.Header.Get("Retry-After")); err == nil && n > 0 {
 		p.retry = time.Duration(n) * time.Second
 	}
