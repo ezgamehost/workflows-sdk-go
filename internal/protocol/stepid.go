@@ -17,6 +17,7 @@ func StepID(name string, occurrence int) string {
 var (
 	stepIDRe       = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
 	workflowNameRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+	appSlugRe      = regexp.MustCompile(`^wfa_[a-z0-9]{12}$`) // an app's prefixed ID
 	uuidRe         = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 	invocationIDRe = regexp.MustCompile(`^inv_[a-z2-7]{26}$`)
 	payloadIDRe    = regexp.MustCompile(`^pay_[a-z2-7]{26}$`)

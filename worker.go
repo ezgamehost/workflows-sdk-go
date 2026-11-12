@@ -38,7 +38,7 @@ type WorkerOptions struct {
 	APIKey         string
 	OrganizationID string
 	ProjectID      string
-	// App is the pull app's ID (Client.CreateApp with Kind "pull").
+	// App is the pull app's ID (Client.CreateApp with Kind "pull"): its UUID or its wfa_ ID.
 	App string
 	// Queue is the app's task queue (default "default"; ^[a-z0-9][a-z0-9-]{0,62}$).
 	Queue string
@@ -194,7 +194,7 @@ func NewWorker(o WorkerOptions) (*Worker, error) {
 	}
 	// The poll the gateway will see: refused here rather than by the gateway.
 	if err := w.request(1).Validate(); err != nil {
-		return nil, fmt.Errorf("workflows.NewWorker: %w (App is the pull app's ID; Queue matches ^[a-z0-9][a-z0-9-]{0,62}$; MaxTasks is 1–10; WorkerID matches ^[A-Za-z0-9._:-]{1,128}$)", err)
+		return nil, fmt.Errorf("workflows.NewWorker: %w (App is the pull app's ID, a UUID or wfa_…; Queue matches ^[a-z0-9][a-z0-9-]{0,62}$; MaxTasks is 1–10; WorkerID matches ^[A-Za-z0-9._:-]{1,128}$)", err)
 	}
 	if err := w.request(o.MaxTasks).Validate(); err != nil {
 		return nil, fmt.Errorf("workflows.NewWorker: %w", err)

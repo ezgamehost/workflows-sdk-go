@@ -240,7 +240,7 @@ func (r InvocationResult) Validate() error {
 // one protocol version, and the announced workflows' names and policies.
 func (r PollRequest) Validate() error {
 	switch {
-	case !uuidRe.MatchString(r.App):
+	case !uuidRe.MatchString(r.App) && !appSlugRe.MatchString(r.App):
 		return invalid("app %q", r.App)
 	case !queueRe.MatchString(r.Queue):
 		return invalid("queue %q", r.Queue)
