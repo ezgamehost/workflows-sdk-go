@@ -376,6 +376,9 @@ retry once when the API answers 401. The Bot needs the actions above, like any k
 `APIKey` always wins; off an instance (or with no Bot attached, `ErrNoBot`) an empty key is still
 an error. Anything on the instance can fetch the Bot's key, containers included.
 
+The same holds in an EZGH sandbox created with a Bot: the clients use the Bot's key from the same
+endpoint. Any code in the sandbox can fetch it.
+
 ### In an EZGH Kubernetes pod
 
 **[built, waiting for EZGH Kubernetes to launch]** With `APIKey` empty, a pod whose service account

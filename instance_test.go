@@ -95,8 +95,37 @@ func newInstanceFake(t *testing.T, onInstance bool) (*instanceFake, *http.Client
 	if onInstance {
 		_ = os.WriteFile(productNamePath, []byte("EZGH Compute\n"), 0o600)
 	}
-	t.Cleanup(func() { productNamePath = old })
+	oldCmdline := cmdlinePath
+	cmdlinePath = filepath.Join(t.TempDir(), "cmdline")
+	t.Cleanup(func() { productNamePath, cmdlinePath = old, oldCmdline })
 	return f, f.srv.Client()
+}
+
+// A sandbox has no product name: ezgh.product=sandbox among the boot arguments, as a whole
+// argument, and then the same endpoint.
+func TestSandboxCredentials(t *testing.T) {
+	f, hc := newInstanceFake(t, false)
+	opts := ClientOptions{OrganizationID: "o", ProjectID: "p", BaseURL: f.srv.URL, HTTPClient: hc}
+	for _, line := range []string{"console=ttyS0 ezgh.product=sandboxes\n", "console=ttyS0 xezgh.product=sandbox\n", "BOOT_IMAGE=/vmlinuz ro\n"} {
+		_ = os.WriteFile(cmdlinePath, []byte(line), 0o600)
+		if _, err := NewClient(opts); err == nil {
+			t.Errorf("%q made a client without a key", line)
+		}
+	}
+	if f.puts != 0 {
+		t.Errorf("%d token requests before a sandbox was detected", f.puts)
+	}
+	_ = os.WriteFile(cmdlinePath, []byte("console=ttyS0 reboot=k ezgh.product=sandbox\n"), 0o600)
+	c, err := NewClient(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Get(context.Background(), "run_1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.apiAuth[len(f.apiAuth)-1]; got != "Bearer "+instKey1 {
+		t.Errorf("auth %q", got)
+	}
 }
 
 func TestInstanceCredentialsRecover(t *testing.T) {

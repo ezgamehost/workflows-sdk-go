@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,6 +32,11 @@ var metadataEndpoints = []string{"http://169.254.169.254", "http://[fd65:7a67:68
 // elsewhere.
 var productNamePath = "/sys/class/dmi/id/product_name"
 
+// cmdlinePath is where the kernel's boot arguments are: an EZGH sandbox, which has no product
+// name, has ezgh.product=sandbox among them and serves its Bot's keys at the same endpoint. Tests
+// point it elsewhere.
+var cmdlinePath = "/proc/cmdline"
+
 // ErrNoBot means the compute instance the code runs on has no Bot attached, so there are no
 // instance credentials.
 var ErrNoBot = errors.New("this instance has no Bot attached")
@@ -51,7 +57,7 @@ type keySource interface {
 
 // newCredential returns the API key if there is one, else the container's credentials when
 // EZGH_CONTAINER_CREDENTIALS_FULL_URI is set, else the instance's credentials when this machine
-// is an EZGH compute instance, else ok is false. No network is touched here.
+// is an EZGH compute instance or an EZGH sandbox, else ok is false. No network is touched here.
 func newCredential(apiKey string) (c credential, ok bool) {
 	if apiKey != "" {
 		return credential{static: secret(apiKey)}, true
@@ -61,7 +67,9 @@ func newCredential(apiKey string) (c credential, ok bool) {
 		return credential{dyn: &containerProvider{uri: uri, tokenFile: os.Getenv(envContainerTokenFile), httpc: newMetadataClient(), now: time.Now}}, true
 	}
 	if b, err := os.ReadFile(productNamePath); err != nil || strings.TrimSpace(string(b)) != "EZGH Compute" {
-		return credential{}, false
+		if b, err = os.ReadFile(cmdlinePath); err != nil || !slices.Contains(strings.Fields(string(b)), "ezgh.product=sandbox") {
+			return credential{}, false
+		}
 	}
 	return credential{dyn: &instanceProvider{httpc: newMetadataClient(), now: time.Now}}, true
 }
